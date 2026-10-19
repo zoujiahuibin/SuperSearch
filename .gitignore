@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境（请各自用 python -m venv 重建）
+venv/
+.venv/
+env/
+
+# 用户本地设置与运行时产物（含个人调参，不入库；首次运行会自动生成默认值）
+settings.json
+
+# 操作系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# WorkBuddy 等本地工作区数据
+.workbuddy/

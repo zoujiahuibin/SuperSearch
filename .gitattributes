@@ -1,0 +1,12 @@
+# 统一以 LF 存入库，避免 Windows/Unix 换行混乱
+* text=auto eol=lf
+
+# 明确按文本处理
+*.py text
+*.md text
+*.txt text
+*.json text
+
+# 二进制（若有）
+*.png binary
+*.ico binary
