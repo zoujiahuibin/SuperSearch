@@ -326,10 +326,16 @@ class MainWindow(QMainWindow):
             self.on_search()
 
     def open_settings(self):
-        """打开「文件格式排序」设置对话框；确认后保存并在已有结果上即时重排。"""
+        """打开「文件格式排序」设置对话框；确认后保存并在已有结果上即时重排。
+
+        只更新格式相关字段，保留 ima 并发等其它设置，避免两个设置组互相重置。
+        """
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.settings = dlg.get_settings()
+            s = dlg.get_settings()
+            self.settings.format_sort_enabled = s.format_sort_enabled
+            self.settings.folders_first = s.folders_first
+            self.settings.format_order = s.format_order
             save_settings(self.settings)
             # 若已有检索结果，按新设置重排并刷新（无需重新查询 Everything）
             if self.all_results:
