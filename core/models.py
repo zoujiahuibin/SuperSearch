@@ -30,6 +30,8 @@ class SearchResult:
     snippet: str = ""
     # 知识库名称（ima 用）
     kb_name: str = ""
+    # 知识库 id（ima 用；用于打开知识库地址 https://ima.qq.com/wikis?knowledgeBaseId=<kb_id>）
+    kb_id: str = ""
 
     def source_label(self) -> str:
         return "本地" if self.source == "local" else "ima"

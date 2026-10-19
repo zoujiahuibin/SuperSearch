@@ -165,6 +165,7 @@ def _search_one_kb(cfg: ImaConfig, kb_id: str, kb_name: str, query: str,
                     modified=None,
                     snippet=it.get("highlight_content", ""),
                     kb_name=kb_name,
+                    kb_id=kb_id,
                 )
             )
         if data.get("is_end") or not data.get("next_cursor"):

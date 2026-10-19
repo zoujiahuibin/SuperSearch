@@ -15,7 +15,7 @@ from typing import List
 
 from PySide6.QtCore import QThread, Signal, QFileInfo, QSize, Qt
 from PySide6.QtGui import QDesktopServices, QColor, QAction
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, QUrlQuery
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -506,9 +506,17 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
         elif r.source == "ima":
-            # ima 无"按知识库 ID 直达"的稳定深链，打开 ima 网页并提示知识库名
-            QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
-            self.status.showMessage(f"已打开 ima 网页，请查看知识库：{r.kb_name or 'ima'}")
+            # ima：打开该结果所属知识库地址 https://ima.qq.com/wikis?knowledgeBaseId=<kb_id>
+            if r.kb_id:
+                url = QUrl("https://ima.qq.com/wikis")
+                query = QUrlQuery()
+                query.addQueryItem("knowledgeBaseId", r.kb_id)  # 自动 URL 编码
+                url.setQuery(query)
+                QDesktopServices.openUrl(url)
+                self.status.showMessage(f"已打开知识库：{r.kb_name or r.kb_id}")
+            else:
+                QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
+                self.status.showMessage("未获取到知识库 ID，已打开 ima 网页")
 
     def _on_table_context_menu(self, pos):
         """结果表格右键菜单：【打开】/【打开路径】。"""
