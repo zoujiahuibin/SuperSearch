@@ -102,6 +102,20 @@ def _post(cfg: ImaConfig, path: str, body: dict, timeout: float = 10.0,
     return payload.get("data", {})
 
 
+def get_media_url(cfg: ImaConfig, media_id: str) -> Optional[str]:
+    """通过 get_media_info 获取知识库文档的可打开/下载直链（用于双击打开）。
+
+    ima 的检索接口不返回文档 URL；该接口按 media_id 返回 data.url_info.url
+    （通常为 COS 预签名链接，可被浏览器直接打开/下载）。失败或无直链时返回 None。
+    """
+    if not media_id:
+        return None
+    data = _post(cfg, "get_media_info", {"media_id": media_id})
+    url_info = data.get("url_info") or {}
+    url = url_info.get("url") or data.get("url") or data.get("media_url") or ""
+    return url or None
+
+
 def list_knowledge_bases(cfg: ImaConfig, query: str = "") -> List[Dict[str, str]]:
     """列出（按名称匹配或为空时列出全部）知识库，返回 [{id, name}]。
 

@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 from typing import List
 
-from PySide6.QtCore import QThread, Signal, QFileInfo, QSize
+from PySide6.QtCore import QThread, Signal, QFileInfo, QSize, Qt
 from PySide6.QtGui import QDesktopServices, QColor, QAction
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -465,6 +465,37 @@ class MainWindow(QMainWindow):
                     QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(r.path)))
             except Exception:  # noqa: BLE001
                 pass
+        elif r.source == "ima":
+            self._open_ima(r)
+
+    def _open_ima(self, r: SearchResult):
+        """双击 ima 结果：取其真实直链并用默认浏览器打开。
+
+        通过 get_media_info(media_id) 拿 data.url_info.url（COS 预签名直链）：
+        PDF/图片会在浏览器直接预览，Office 等文件浏览器会下载到本地。
+        失败或无直链时回退为打开 ima 网页，供手动定位。
+        """
+        if not self.ima_cfg.has_credentials or not r.ref_id:
+            QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
+            self.status.showMessage("未配置 ima 凭证或无文档 ID，已打开 ima 网页")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        url = None
+        err = ""
+        try:
+            url = ima_search.get_media_url(self.ima_cfg, r.ref_id)
+        except ima_search.ImaApiError as e:
+            err = e.msg
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+            self.status.showMessage("已在默认浏览器打开 ima 文档")
+        else:
+            QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
+            self.status.showMessage(f"未取到直链（{err or '无 url'}），已打开 ima 网页")
 
 
 def main():
