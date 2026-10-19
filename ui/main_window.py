@@ -528,7 +528,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.chk_folders)
 
         layout.addWidget(
-            QLabel("文件格式优先级（从上到下，越靠上越优先；不含点，如 pdf）：")
+            QLabel("格式优先级（从上到下，越靠上越优先；不含点，如 pdf）。"
+                   "ima 文档与本地文件按扩展名混排；把 folder 加入列表可控制文件夹位置。")
         )
 
         self.listw = QListWidget()
@@ -537,10 +538,12 @@ class SettingsDialog(QDialog):
 
         btn_row = QHBoxLayout()
         b_add = QPushButton("添加")
+        b_folder = QPushButton("＋文件夹(folder)")
         b_del = QPushButton("删除")
         b_up = QPushButton("上移")
         b_down = QPushButton("下移")
         btn_row.addWidget(b_add)
+        btn_row.addWidget(b_folder)
         btn_row.addWidget(b_del)
         btn_row.addWidget(b_up)
         btn_row.addWidget(b_down)
@@ -555,6 +558,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(ok_row)
 
         b_add.clicked.connect(self._on_add)
+        b_folder.clicked.connect(self._on_add_folder)
         b_del.clicked.connect(self._on_del)
         b_up.clicked.connect(lambda: self._move(-1))
         b_down.clicked.connect(lambda: self._move(1))
@@ -562,9 +566,23 @@ class SettingsDialog(QDialog):
         b_cancel.clicked.connect(self.reject)
 
     def _on_add(self):
-        ext, ok = QInputDialog.getText(self, "添加格式", "输入文件扩展名（不含点，如 pdf）：")
+        ext, ok = QInputDialog.getText(
+            self, "添加格式", "输入文件扩展名（不含点，如 pdf）；文件夹用 folder：")
         if ok and ext.strip():
-            self.listw.addItem(_normalize_ext(ext))
+            self._add_unique(_normalize_ext(ext))
+
+    def _on_add_folder(self):
+        # 一键把"文件夹"作为一种格式加入列表（去重）
+        self._add_unique("folder")
+
+    def _add_unique(self, text: str):
+        if not text:
+            return
+        existing = [self.listw.item(i).text() for i in range(self.listw.count())]
+        if text in existing:
+            return
+        self.listw.addItem(text)
+        self.listw.setCurrentRow(self.listw.count() - 1)
 
     def _on_del(self):
         row = self.listw.currentRow()

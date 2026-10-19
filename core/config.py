@@ -126,8 +126,10 @@ def load_everything_config() -> EverythingConfig:
 # 用户设置（文件格式优先级排序）
 # ---------------------------------------------------------------------------
 
-# 默认文件格式优先级（仅供参考，用户可在「设置」中修改）
-DEFAULT_FORMAT_ORDER = ["pdf", "docx", "xlsx", "pptx", "txt", "md"]
+# 默认文件格式优先级（仅供参考，用户可在「设置」中修改）。
+# "folder" 是文件夹的伪格式，列入列表即可把文件夹排到任意位置与各格式混排；
+# 未列入时由 folders_first（文件夹置顶）决定。
+DEFAULT_FORMAT_ORDER = ["folder", "pdf", "docx", "xlsx", "pptx", "txt", "md"]
 
 
 @dataclass

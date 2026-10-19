@@ -167,17 +167,54 @@ class TestSettings(unittest.TestCase):
             SearchResult(source="local", title="b.xlsx", kind="file"),
             SearchResult(source="local", title="a.pdf", kind="file"),
             SearchResult(source="local", title="c.docx", kind="file"),
+            SearchResult(source="ima", title="i2.pdf"),
+            SearchResult(source="ima", title="i3.docx"),
+            SearchResult(source="ima", title="note"),  # 无扩展名 -> 未列入
             SearchResult(source="local", title="z folder", kind="folder"),
-            SearchResult(source="ima", title="Doc1", kind=""),
         ]
         out = format_sort.reorder_by_format(results, s)
         titles = [r.title for r in out]
-        # 文件夹置顶 -> pdf -> docx -> 未列入的 xlsx(末尾) -> ima
-        self.assertEqual(titles[0], "z folder")
-        self.assertEqual(titles[1], "a.pdf")
-        self.assertEqual(titles[2], "c.docx")
-        self.assertEqual(titles[3], "b.xlsx")
-        self.assertEqual(titles[4], "Doc1")
+        # 文件夹置顶 -> pdf(本地 a.pdf, ima i2.pdf) -> docx(本地 c.docx, ima i3.docx)
+        #   -> 未列入(b.xlsx, note)。ima 不再固定排最后，而是按格式与本地混排。
+        self.assertEqual(
+            titles,
+            ["z folder", "a.pdf", "i2.pdf", "c.docx", "i3.docx", "b.xlsx", "note"],
+        )
+
+    def test_folder_as_format_first(self):
+        # 'folder' 列入格式列表：文件夹按其所列位置与各格式混排
+        s = Settings(format_sort_enabled=True, folders_first=True,
+                     format_order=["folder", "pdf", "docx"])
+        results = [
+            SearchResult(source="local", title="a.pdf", kind="file"),
+            SearchResult(source="local", title="z folder", kind="folder"),
+            SearchResult(source="local", title="c.docx", kind="file"),
+        ]
+        out = format_sort.reorder_by_format(results, s)
+        self.assertEqual([r.title for r in out], ["z folder", "a.pdf", "c.docx"])
+
+    def test_folder_position_in_list(self):
+        # 'folder' 放在中间：覆盖 folders_first，文件夹排在 pdf 与 docx 之间
+        s = Settings(format_sort_enabled=True, folders_first=True,
+                     format_order=["pdf", "folder", "docx"])
+        results = [
+            SearchResult(source="local", title="a.pdf", kind="file"),
+            SearchResult(source="local", title="c.docx", kind="file"),
+            SearchResult(source="local", title="z folder", kind="folder"),
+        ]
+        out = format_sort.reorder_by_format(results, s)
+        self.assertEqual([r.title for r in out], ["a.pdf", "z folder", "c.docx"])
+
+    def test_folder_not_listed_not_first_goes_last(self):
+        # 未列入 folder 且不置顶：文件夹按未列入处理，排在已列格式之后
+        s = Settings(format_sort_enabled=True, folders_first=False,
+                     format_order=["pdf"])
+        results = [
+            SearchResult(source="local", title="z folder", kind="folder"),
+            SearchResult(source="local", title="a.pdf", kind="file"),
+        ]
+        out = format_sort.reorder_by_format(results, s)
+        self.assertEqual([r.title for r in out], ["a.pdf", "z folder"])
 
     def test_reorder_disabled_keeps_order(self):
         s = Settings(format_sort_enabled=False, format_order=["pdf", "docx"])
