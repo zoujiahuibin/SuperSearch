@@ -1,4 +1,4 @@
-# 统一检索工具：本地文件 + ima 知识库
+# SuperSearch：统一检索（本地文件 + ima 知识库）
 
 一个独立的桌面 GUI（PySide6），同时检索：
 
@@ -81,8 +81,8 @@ IMA_KB_IDS=kb_id_1,kb_id_2
 
 ```bash
 # 1. 克隆并进入项目
-git clone https://github.com/zoujiahuibin/Super-search.git
-cd Super-search
+git clone https://github.com/zoujiahuibin/SuperSearch.git
+cd SuperSearch
 
 # 2. 创建虚拟环境并安装依赖（Python 3.9+）
 python -m venv venv
@@ -158,10 +158,50 @@ core/config.py          配置（ima 凭证 / Everything 端口 / 用户设置 S
 core/models.py          统一结果模型 SearchResult（含 source 标签）
 core/format_sort.py     按文件格式优先级在客户端重排
 search/local_search.py  Everything HTTP 检索
-search/ima_search.py    ima OpenAPI 检索（跨库串行 + 限流退避 + 游标分页）
+search/ima_search.py    ima OpenAPI 检索（受控并发 + 令牌桶限速 + 游标分页）
 ui/main_window.py       PySide6 主窗口（后台线程检索，合并列表）
 tests/smoke_test.py     纯逻辑冒烟测试
+SuperSearch.iss         Inno Setup 安装脚本（用于生成 setup.exe，见下）
 ```
+
+---
+
+## 打包为 Windows 可执行文件（.exe）
+
+本项目用 **PyInstaller** 打成单文件、无控制台的 Windows 程序（已内置 PySide6 运行库，
+目标机器无需安装 Python / PySide6，双击即用；原项目源码不受影响，仅输出到 `dist/`）。
+
+### 已产出
+- `dist/SuperSearch.exe` —— 单文件可执行程序（约 47 MB）。直接双击运行即可使用；
+  也可拷贝到任意 Windows x64 机器运行（仍需目标机安装并启用 Everything 才能本地检索，
+  ima 检索需网络 + 已配置凭证）。
+
+### 自行重新打包
+```bash
+# 在项目 venv 中（已含 PySide6 / requests）安装 PyInstaller
+venv/Scripts/python.exe -m pip install pyinstaller
+# 打单文件、无控制台窗口；输出到 dist/，中间产物在 build/（均已被 .gitignore 忽略）
+venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --onefile --windowed \
+  --name SuperSearch --distpath dist --workpath build main.py
+```
+> 说明：本应用文件图标走 Windows shell（`QFileIconProvider`），无自带资源文件，
+> 故打包无需额外 `--add-data`；PyInstaller 的 PySide6 钩子会自动带上 Qt 平台插件
+> （`qwindows`/`qoffscreen` 等）。
+
+### 生成"可安装"的 setup.exe（可选）
+单文件 exe 已是"便携 / 直接使用"版。若想要带开始菜单/桌面快捷方式的安装程序，
+用 **Inno Setup** 编译随附的 `SuperSearch.iss`：
+
+1. 安装 Inno Setup 6（https://jrsoftware.org/isinfo.php）。
+2. 先按上面步骤生成 `dist\SuperSearch.exe`。
+3. 编译脚本：
+   ```
+   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" SuperSearch.iss
+   ```
+   得到 `dist\SuperSearch-Setup.exe`，双击即可安装使用。
+
+> 注：本仓库的 `.gitignore` 已忽略 `dist/`、`build/` 与 `settings.json`，
+> 因此打包产物与个人设置不会进入版本库；`SuperSearch.iss`、`requirements.txt` 等源文件保留。
 
 ---
 
