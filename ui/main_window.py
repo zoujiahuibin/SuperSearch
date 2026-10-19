@@ -336,6 +336,7 @@ class MainWindow(QMainWindow):
             self.settings.format_sort_enabled = s.format_sort_enabled
             self.settings.folders_first = s.folders_first
             self.settings.format_order = s.format_order
+            self.settings.group_by_name = s.group_by_name
             save_settings(self.settings)
             # 若已有检索结果，按新设置重排并刷新（无需重新查询 Everything）
             if self.all_results:
@@ -533,6 +534,13 @@ class SettingsDialog(QDialog):
         self.chk_folders.setChecked(settings.folders_first)
         layout.addWidget(self.chk_folders)
 
+        self.chk_group = QCheckBox("同名结果归组（本地 / ima 混排相邻）")
+        self.chk_group.setChecked(getattr(settings, "group_by_name", True))
+        self.chk_group.setToolTip(
+            "把本地与 ima 中同名的结果排在一起，不再分成“本地一堆 / ima 一堆”。"
+        )
+        layout.addWidget(self.chk_group)
+
         layout.addWidget(
             QLabel("格式优先级（从上到下，越靠上越优先；不含点，如 pdf）。"
                    "ima 文档与本地文件按扩展名混排；把 folder 加入列表可控制文件夹位置。")
@@ -612,6 +620,7 @@ class SettingsDialog(QDialog):
             format_order=[
                 self.listw.item(i).text() for i in range(self.listw.count())
             ],
+            group_by_name=self.chk_group.isChecked(),
         )
 
 

@@ -144,6 +144,8 @@ class Settings:
     ima_max_workers: int = 4     # 最大并发线程数
     ima_req_per_sec: float = 4.0  # 全局请求速率上限（令牌桶，请求/秒）
     ima_burst: int = 2           # 令牌桶突发容量（最大瞬时并发）
+    # 同名结果归组：把本地与 ima 中同名的结果排在一起（混排，不再分本地/ima 两部分）
+    group_by_name: bool = True
 
 
 def settings_path() -> Path:
@@ -186,6 +188,7 @@ def load_settings() -> Settings:
                 ima_max_workers=_clamp_int(data.get("ima_max_workers", 4), 1, 32, 4),
                 ima_req_per_sec=_clamp_float(data.get("ima_req_per_sec", 4.0), 0.5, 50.0, 4.0),
                 ima_burst=_clamp_int(data.get("ima_burst", 2), 1, 16, 2),
+                group_by_name=bool(data.get("group_by_name", True)),
             )
         except (json.JSONDecodeError, OSError, ValueError):
             pass
@@ -202,6 +205,7 @@ def save_settings(s: Settings) -> None:
         "ima_max_workers": s.ima_max_workers,
         "ima_req_per_sec": s.ima_req_per_sec,
         "ima_burst": s.ima_burst,
+        "group_by_name": s.group_by_name,
     }
     p.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

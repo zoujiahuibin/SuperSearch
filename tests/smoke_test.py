@@ -147,6 +147,7 @@ class TestSettings(unittest.TestCase):
         s = Settings()
         self.assertFalse(s.format_sort_enabled)
         self.assertTrue(s.folders_first)
+        self.assertTrue(s.group_by_name)
         self.assertIn("pdf", s.format_order)
 
     def test_roundtrip(self):
@@ -217,13 +218,78 @@ class TestSettings(unittest.TestCase):
         self.assertEqual([r.title for r in out], ["a.pdf", "z folder"])
 
     def test_reorder_disabled_keeps_order(self):
-        s = Settings(format_sort_enabled=False, format_order=["pdf", "docx"])
+        s = Settings(format_sort_enabled=False, group_by_name=False,
+                     format_order=["pdf", "docx"])
         results = [
             SearchResult(source="local", title="b.xlsx", kind="file"),
             SearchResult(source="local", title="a.pdf", kind="file"),
         ]
         out = format_sort.reorder_by_format(results, s)
         self.assertEqual([r.title for r in out], ["b.xlsx", "a.pdf"])
+
+    def test_group_by_name_mixes_sources(self):
+        # 同名本地+ima 归组到首次出现处，混排（不再分本地/ima 两部分）
+        s = Settings(format_sort_enabled=False, group_by_name=True)
+        results = [
+            SearchResult(source="local", title="a.pdf", kind="file"),
+            SearchResult(source="local", title="b.pdf", kind="file"),
+            SearchResult(source="ima", title="a.pdf"),
+            SearchResult(source="ima", title="b.pdf"),
+            SearchResult(source="ima", title="c.pdf"),  # ima 独有，跟在后面
+        ]
+        out = format_sort.reorder_by_format(results, s)
+        self.assertEqual(
+            [(r.title, r.source) for r in out],
+            [("a.pdf", "local"), ("a.pdf", "ima"),
+             ("b.pdf", "local"), ("b.pdf", "ima"),
+             ("c.pdf", "ima")],
+        )
+
+    def test_group_by_name_disabled_keeps_separated(self):
+        # 关闭同名归组：保持“本地一堆 / ima 一堆”的原始顺序
+        s = Settings(format_sort_enabled=False, group_by_name=False)
+        results = [
+            SearchResult(source="local", title="a.pdf", kind="file"),
+            SearchResult(source="local", title="b.pdf", kind="file"),
+            SearchResult(source="ima", title="a.pdf"),
+            SearchResult(source="ima", title="b.pdf"),
+        ]
+        out = format_sort.reorder_by_format(results, s)
+        self.assertEqual(
+            [(r.title, r.source) for r in out],
+            [("a.pdf", "local"), ("b.pdf", "local"),
+             ("a.pdf", "ima"), ("b.pdf", "ima")],
+        )
+
+    def test_group_by_name_with_format(self):
+        # 格式优先 + 同名归组：同一格式内同名相邻混排
+        s = Settings(format_sort_enabled=True, group_by_name=True,
+                     format_order=["pdf"])
+        results = [
+            SearchResult(source="local", title="a.pdf", kind="file"),
+            SearchResult(source="local", title="b.pdf", kind="file"),
+            SearchResult(source="ima", title="a.pdf"),
+            SearchResult(source="ima", title="b.pdf"),
+        ]
+        out = format_sort.reorder_by_format(results, s)
+        self.assertEqual(
+            [(r.title, r.source) for r in out],
+            [("a.pdf", "local"), ("a.pdf", "ima"),
+             ("b.pdf", "local"), ("b.pdf", "ima")],
+        )
+
+    def test_group_by_name_case_insensitive(self):
+        # 忽略大小写：Report.pdf 与 report.pdf 视为同名归组
+        s = Settings(format_sort_enabled=False, group_by_name=True)
+        results = [
+            SearchResult(source="local", title="Report.pdf", kind="file"),
+            SearchResult(source="ima", title="report.pdf"),
+        ]
+        out = format_sort.reorder_by_format(results, s)
+        self.assertEqual(
+            [(r.title, r.source) for r in out],
+            [("Report.pdf", "local"), ("report.pdf", "ima")],
+        )
 
 
 class TestImaSearch(unittest.TestCase):

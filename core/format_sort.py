@@ -54,11 +54,31 @@ def format_rank(r: SearchResult, settings: Settings) -> Tuple[int, int]:
 def reorder_by_format(
     results: List[SearchResult], settings: Settings
 ) -> List[SearchResult]:
-    """按文件格式优先级重排；未启用时原样返回。
+    """重排搜索结果；未做任何重排时原样返回。
 
-    输入中本地结果已按 Everything 的次级排序、ima 结果按接口返回序排列；
-    稳定排序后，同 (分组, 组内序号) 内保持该既有顺序。
+    两步（均可独立开关）：
+    1. 若 format_sort_enabled：按格式优先级排序（主键为格式）；
+    2. 若 group_by_name：把**同名**结果归组到该名称首次出现处——本地与 ima 的
+       同名项因此排在一起（混排，不再分"本地一堆 / ima 一堆"）。用稳定排序 +
+       "名称首次出现下标"作键，整体顺序保持首次出现顺序（本地 Everything 顺序为骨架，
+       ima 副本贴到同名本地项旁，ima 独有项跟在后面）。
     """
-    if not settings.format_sort_enabled:
-        return results
-    return sorted(results, key=lambda r: format_rank(r, settings))
+    out = results
+    if settings.format_sort_enabled:
+        out = sorted(out, key=lambda r: format_rank(r, settings))
+    if getattr(settings, "group_by_name", True):
+        out = _group_by_name_stable(out)
+    return out
+
+
+def _name_key(r: SearchResult) -> str:
+    """同名归组的比较键：标题去空白、忽略大小写。"""
+    return (r.title or "").strip().casefold()
+
+
+def _group_by_name_stable(items: List[SearchResult]) -> List[SearchResult]:
+    """把同名项归组到其首次出现位置（稳定排序，保留组内与组间既有顺序）。"""
+    first_index: dict = {}
+    for i, it in enumerate(items):
+        first_index.setdefault(_name_key(it), i)
+    return sorted(items, key=lambda it: first_index[_name_key(it)])
