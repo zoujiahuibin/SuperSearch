@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from datetime import datetime
 from typing import List
 
@@ -262,6 +263,8 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setIconSize(QSize(16, 16))  # 小图标，与 Everything 一致
         self.table.doubleClicked.connect(self.on_open)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_context_menu)
         self.table.itemSelectionChanged.connect(self.on_select)
         root.addWidget(self.table, 1)
 
@@ -459,12 +462,21 @@ class MainWindow(QMainWindow):
         self.detail.setPlainText("\n".join(lines))
 
     def on_open(self):
+        r = self._current_result()
+        if r is not None:
+            self._open_result(r)
+
+    def _current_result(self):
+        """取当前选中行对应的 SearchResult；无有效行返回 None。"""
         row = self.table.currentRow()
-        if row < 0 or row >= len(self._filtered(self.filter_combo.currentText())):
-            return
-        r = self._filtered(self.filter_combo.currentText())[row]
+        data = self._filtered(self.filter_combo.currentText())
+        if 0 <= row < len(data):
+            return data[row]
+        return None
+
+    def _open_result(self, r: SearchResult):
+        """【打开】：与双击一致——本地打开文件；ima 取其直链用浏览器打开。"""
         if r.source == "local" and r.path:
-            # 打开所在文件夹并选中文件（Windows）
             try:
                 if os.path.isfile(r.path):
                     QDesktopServices.openUrl(QUrl.fromLocalFile(r.path))
@@ -474,6 +486,47 @@ class MainWindow(QMainWindow):
                 pass
         elif r.source == "ima":
             self._open_ima(r)
+
+    def _open_result_path(self, r: SearchResult):
+        """【打开路径】：本地打开所在文件夹（并选中文件）；ima 打开 ima 网页到对应知识库。"""
+        if r.source == "local" and r.path:
+            folder = os.path.dirname(r.path)
+            try:
+                if os.path.isdir(r.path):
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(r.path))
+                    return
+                if folder and os.path.isdir(folder):
+                    # Windows：资源管理器打开并选中该文件
+                    if os.name == "nt":
+                        subprocess.Popen(["explorer", "/select," + r.path])
+                    else:
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+                else:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(folder or r.path))
+            except Exception:  # noqa: BLE001
+                pass
+        elif r.source == "ima":
+            # ima 无"按知识库 ID 直达"的稳定深链，打开 ima 网页并提示知识库名
+            QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
+            self.status.showMessage(f"已打开 ima 网页，请查看知识库：{r.kb_name or 'ima'}")
+
+    def _on_table_context_menu(self, pos):
+        """结果表格右键菜单：【打开】/【打开路径】。"""
+        item = self.table.itemAt(pos)
+        row = item.row() if item is not None else self.table.currentRow()
+        data = self._filtered(self.filter_combo.currentText())
+        if not (0 <= row < len(data)):
+            return
+        self.table.selectRow(row)  # 同步选中被右键的行
+        r = data[row]
+        menu = QMenu(self)
+        act_open = menu.addAction("打开")
+        act_path = menu.addAction("打开路径")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen == act_open:
+            self._open_result(r)
+        elif chosen == act_path:
+            self._open_result_path(r)
 
     def _open_ima(self, r: SearchResult):
         """双击 ima 结果：取其真实直链并用默认浏览器打开。
