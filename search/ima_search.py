@@ -35,6 +35,23 @@ IMA_MAX_WORKERS = int(os.environ.get("IMA_MAX_WORKERS", "4"))
 IMA_REQ_PER_SEC = float(os.environ.get("IMA_REQ_PER_SEC", "4.0"))
 IMA_BURST = int(os.environ.get("IMA_BURST", "2"))
 
+# 知识库类型（UI 勾选项）与其在 API 返回 base_type 字段里的匹配关键字。
+# 经真实接口确认（2026-10-20）：
+#   个人知识库 -> base_type == "个人知识库"
+#   订阅知识库 -> base_type == "我加入的订阅知识库"
+# 共享知识库 当前账号无样本，按关键字 "共享" 做子串匹配；若官方实际字面值不同，
+# 仅调整此处 _KB_TYPE_KEYWORDS 即可，无需改动调用方。
+KB_TYPE_LABELS = ["个人知识库", "共享知识库", "订阅知识库"]
+_KB_TYPE_KEYWORDS = {
+    "个人知识库": "个人",
+    "共享知识库": "共享",
+    "订阅知识库": "订阅",
+}
+
+# ima 对订阅知识库「资料获取」的每日额度限制错误码（与个人库无关）。
+# 触发后当日无法对订阅库做全文检索，需次日额度恢复；不属于限流(200001)，不应重试。
+KB_QUOTA_EXCEEDED_CODE = 220021
+
 
 class ImaApiError(Exception):
     def __init__(self, msg: str, code: int = -1):
@@ -168,21 +185,32 @@ def ima_client_kb_url(numeric_kb_id: str) -> str:
 def ima_client_doc_url(numeric_kb_id: str, media_id: str) -> str:
     """ima 电脑端「打开知识库内某篇文档」深链（精准定位到该篇）。
 
-    复刻客户端内置前端 xQ 桥：
-        imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>&mediaId=<媒体ID>&launchChannel=10000154
+    复刻客户端内置前端「知识库页」(扩展 nkohmbngmopdajidckglcoehlaeepeoi) 的自动打开逻辑：
+    该页在挂载时会读取 URL 中的 action / knowledgeBaseId / mediaId，且仅当
+        action === "autoOpenMedia" 且 knowledgeBaseId 与 mediaId 同时存在
+    时才会真正调 openKnowledgeMedia 打开对应文档
+    （REA 其 index-Bdu-6Zli.js 的 k() 函数确认：「if(!(wr()===it.AutoOpenMedia&&!!H&&!!y))return」）。
+
+    因此文档深链必须复用与「打开知识库」一致的 open?url= 桥（透明加载该扩展页），
+    并在内层地址上显式带上 action=autoOpenMedia：
+        imacopilot://open?url=chrome-extension://<KB扩展>/index.html
+            ?action=autoOpenMedia&knowledgeBaseId=<数字ID>&mediaId=<媒体ID>
+    注意：不能走 knowledgeDetail 协议——它不会注入 action=autoOpenMedia，
+    页面只会定位到知识库而停留在“未打开文档”状态（即此前实测失败的根因）。
     numeric_kb_id 为数字型 knowledgeBaseId；media_id 为文档的 media_id（search 结果里的 ref_id）。
-    launchChannel 取自客户端默认常量 vQ="10000154"（其 xQ 永远带此参数）。
     """
-    from urllib.parse import urlencode
-    return "imacopilot://knowledgeDetail?" + urlencode(
-        {"knowledgeBaseId": numeric_kb_id, "mediaId": media_id,
-         "launchChannel": "10000154"})
+    return (
+        f"imacopilot://open?url="
+        f"chrome-extension://{_IMA_KB_EXT_ID}/index.html"
+        f"?action=autoOpenMedia&knowledgeBaseId={numeric_kb_id}&mediaId={media_id}"
+    )
 
 
 def list_knowledge_bases(cfg: ImaConfig, query: str = "") -> List[Dict[str, str]]:
-    """列出（按名称匹配或为空时列出全部）知识库，返回 [{id, name}]。
+    """列出（按名称匹配或为空时列出全部）知识库，返回 [{id, name, base_type}]。
 
     兼容 ima 不同接口版本：优先用 kb_id / kb_name，回退到 id / name。
+    base_type 为知识库类型（个人知识库 / 共享知识库 / 订阅知识库），用于按类型筛选。
     """
     out: List[Dict[str, str]] = []
     cursor = ""
@@ -192,6 +220,7 @@ def list_knowledge_bases(cfg: ImaConfig, query: str = "") -> List[Dict[str, str]
             out.append({
                 "id": it.get("kb_id") or it.get("id", ""),
                 "name": it.get("kb_name") or it.get("name", ""),
+                "base_type": it.get("base_type") or "",
             })
         if data.get("is_end") or not data.get("next_cursor"):
             break
@@ -199,6 +228,45 @@ def list_knowledge_bases(cfg: ImaConfig, query: str = "") -> List[Dict[str, str]
         if not cursor:
             break
     return out
+
+
+def _kb_matches_types(kb: Dict[str, str], kb_types) -> bool:
+    """判断知识库是否落在所选类型内。
+
+    kb_types 语义：
+      - None  -> 不限类型（匹配全部）；
+      - []    -> 未勾选任何类型（匹配 none，即不检索任何知识库）；
+      - 列表  -> 只匹配 base_type 命中其中任一标签关键字的库。
+    匹配方式：取各标签对应的关键字（_KB_TYPE_KEYWORDS）做 base_type 子串匹配。
+    """
+    if kb_types is None:
+        return True
+    if not kb_types:
+        return False
+    bt = (kb.get("base_type") or "")
+    for label in kb_types:
+        kw = _KB_TYPE_KEYWORDS.get(label)
+        if kw and kw in bt:
+            return True
+    return False
+
+
+def _ima_item_is_folder(it: dict, media_id: str) -> bool:
+    """判断搜索结果是否为文件夹（而非文档）。
+
+    经真实接口逆向确认（get_knowledge_list / search_knowledge）：
+      - 文件夹项的 media_type == 99，且 media_id 以 "folder_" 开头；
+      - 文档（PDF）media_type == 1、media_id 以 "pdf_" 开头；笔记 media_type == 11。
+    因此以 media_type==99 或 media_id 前缀 "folder_" 为主判据，空 media_id 作兜底。
+    """
+    mt = it.get("media_type")
+    if mt is not None and str(mt) == "99":
+        return True
+    if media_id and media_id.startswith("folder_"):
+        return True
+    if not media_id:
+        return True
+    return False
 
 
 def _search_one_kb(cfg: ImaConfig, kb_id: str, kb_name: str, query: str,
@@ -215,14 +283,18 @@ def _search_one_kb(cfg: ImaConfig, kb_id: str, kb_name: str, query: str,
         )
         for it in data.get("info_list", []):
             media_id = it.get("media_id", "")
-            if media_id in seen:
+            is_folder = _ima_item_is_folder(it, media_id)
+            # 文件夹无 media_id，用标题去重避免重复
+            key = media_id or it.get("title", "")
+            if key in seen:
                 continue
-            seen.add(media_id)
+            seen.add(key)
             results.append(
                 SearchResult(
                     source="ima",
                     title=it.get("title", "") or "(无标题)",
                     path="",
+                    kind="folder" if is_folder else "",
                     ref_id=media_id,
                     size=None,
                     modified=None,
@@ -282,11 +354,16 @@ def search_ima(
     progress_callback: Optional[callable] = None,
     req_per_sec: Optional[float] = None,
     burst: Optional[int] = None,
+    kb_types: Optional[List[str]] = None,
 ) -> Tuple[List[SearchResult], List[str]]:
     """检索 ima 知识库，返回 (结果列表, 错误信息列表)。
 
     kb_ids 为显式知识库 ID 列表；为空时按名称匹配自动发现知识库。
-    progress_callback(done, total) 在每个知识库检索完成后回调，用于汇报进度（百分比）。
+    kb_types 为所选知识库类型标签（如 ["个人知识库"]）；为 None 或覆盖全部类型时
+    不做类型限制；否则只检索 base_type 命中所选类型的知识库。
+    注意：kb_types 仅在自动发现（kb_ids 为空）时生效；显式指定 kb_ids 时以列表为准。
+    progress_callback(done, total, result_count) 在每个知识库检索完成后回调，用于汇报进度：
+    已完成库数 / 总库数 / 已得结果数（便于 UI 显示"已检索 N/Y 个库，已得 M 条结果"）。
     max_workers / req_per_sec / burst 控制并发与限速，优先取调用方传入，
     缺省时回退到环境变量（IMA_MAX_WORKERS / IMA_REQ_PER_SEC / IMA_BURST）。
     """
@@ -310,6 +387,12 @@ def search_ima(
         except requests.RequestException as e:
             return [], [f"连接 ima 失败：{e}"]
 
+        # 按所选知识库类型过滤（仅在自动发现时生效）：
+        # kb_types 为 None（全选）或覆盖了全部类型 -> 不限制；
+        # 否则只保留 base_type 命中所选类型的知识库（[] 表示全不选 -> 不检索任何库）。
+        if kb_types is not None and set(kb_types) != set(KB_TYPE_LABELS):
+            kb_targets = [t for t in kb_targets if _kb_matches_types(t, kb_types)]
+
     if not kb_targets:
         # 没有按名称命中的知识库，尝试拉取用户全部知识库（名称搜索为空时回退）
         return [], []
@@ -326,6 +409,7 @@ def search_ima(
     total = len(kb_targets)
     done = 0
     lock = threading.Lock()
+    raw_errors = []  # (kb_name, msg, code) 原始错误，便于按 code 归类合并
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         futures = {
             ex.submit(_search_one_kb_with_retry, cfg, t["id"], t["name"], query,
@@ -333,16 +417,33 @@ def search_ima(
             for t in kb_targets
         }
         for f in as_completed(futures):
+            name = futures[f]["name"]
             try:
                 all_results.extend(f.result())
             except ImaApiError as e:
-                errors.append(f"知识库 {futures[f]['name']} 检索失败：{e.msg}")
+                raw_errors.append((name, e.msg, e.code))
             except requests.RequestException as e:
-                errors.append(f"知识库 {futures[f]['name']} 连接失败：{e}")
+                raw_errors.append((name, f"连接失败：{e}", -1))
             with lock:
                 done += 1
                 cur = done
+                nres = len(all_results)
+            # 回调带"已完成库数 / 总库数 / 已得结果数"，便于 UI 显示可读进度
             if progress_callback:
-                progress_callback(cur, total)
+                progress_callback(cur, total, nres)
+
+    # 整理错误信息：订阅库「资料获取」每日额度(220021)耗尽时，把 N 条重复报错合并为一条明确提示，
+    # 避免刷屏；个人库等其它真实错误仍逐条显示。
+    quota_errs = [r for r in raw_errors if r[2] == KB_QUOTA_EXCEEDED_CODE]
+    other_errs = [r for r in raw_errors if r[2] != KB_QUOTA_EXCEEDED_CODE]
+    if quota_errs:
+        names = "、".join(r[0] for r in quota_errs[:5])
+        more = "" if len(quota_errs) <= 5 else f" 等共 {len(quota_errs)} 个"
+        errors.append(
+            f"订阅知识库（{names}{more}）因 ima 每日「资料获取」额度已用尽，今日暂不可全文检索；"
+            f"个人知识库不受影响。明天额度恢复后可正常检索。"
+        )
+    for name, msg, _ in other_errs:
+        errors.append(f"知识库 {name} 检索失败：{msg}")
 
     return all_results, errors

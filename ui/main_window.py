@@ -1,7 +1,7 @@
 """主窗口 UI：合并展示本地（Everything）与 ima 知识库检索结果。
 
 布局：
-  - 顶部：搜索框 + 搜索按钮 + 来源勾选（本地 / ima）
+  - 顶部：搜索框 + 搜索按钮 + 来源勾选（本地 / ima）；勾选「本地」后展开盘符勾选区（C盘 / E盘…，自动探测）；勾选「ima 知识库」后展开知识库类型勾选区（个人 / 共享 / 订阅）
   - 中部：结果表格（来源标签 / 标题 / 位置 / 大小 / 修改时间）
   - 底部：来源筛选下拉 + 状态栏 + 选中详情（ima 高亮摘要）
 检索在后台线程进行，避免界面卡顿。
@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
-from PySide6.QtCore import QThread, Signal, QFileInfo, QSize, Qt
+from PySide6.QtCore import QThread, Signal, QFileInfo, QSize, Qt, QDir
 from PySide6.QtGui import QDesktopServices, QColor, QAction
 from PySide6.QtCore import QUrl, QUrlQuery
 from PySide6.QtWidgets import (
@@ -64,6 +64,20 @@ from search import local_search, ima_search
 COLOR_LOCAL = QColor("#1565C0")  # 蓝
 COLOR_IMA = QColor("#2E7D32")    # 绿
 
+def _detect_drives() -> List[str]:
+    """检测本机存在的盘符字母（Windows）。非 Windows 返回 ["C"] 兜底。"""
+    import string
+    drives = []
+    if os.name == "nt":
+        for letter in string.ascii_uppercase:
+            # 用 os.path.exists 探测盘符是否挂载（含可移动/网络盘）
+            if os.path.exists(f"{letter}:\\"):
+                drives.append(letter)
+    else:
+        drives = ["C"]
+    return drives
+
+
 # 排序选项：标签 -> (Everything sort 字段, 是否升序)
 # 字段取值须与 Everything HTTP 的 sort 参数一致：name/path/date_modified/size
 SORT_OPTIONS = [
@@ -106,7 +120,8 @@ class SearchWorker(QThread):
 
     def __init__(self, query: str, ev_cfg: EverythingConfig, ima_cfg: ImaConfig,
                  kb_ids, do_local: bool, do_ima: bool, ima_max_workers: int = 4,
-                 ima_req_per_sec: float = 4.0, ima_burst: int = 2):
+                 ima_req_per_sec: float = 4.0, ima_burst: int = 2,
+                 local_drives: List[str] = None, ima_kb_types: List[str] = None):
         super().__init__()
         self.query = query
         self.ev_cfg = ev_cfg
@@ -114,6 +129,10 @@ class SearchWorker(QThread):
         self.kb_ids = kb_ids
         self.do_local = do_local
         self.do_ima = do_ima
+        # 本地检索限定的盘符（None/空 = 检索全部盘符）
+        self.local_drives = local_drives
+        # ima 检索限定的知识库类型（None = 检索全部类型）
+        self.ima_kb_types = ima_kb_types
         # ima 并发/限速配置（来自用户设置，可在「设置 → ima 提速」中调整）
         self.ima_max_workers = ima_max_workers
         self.ima_req_per_sec = ima_req_per_sec
@@ -130,7 +149,8 @@ class SearchWorker(QThread):
             self.progress.emit("正在检索本地文件（Everything）…")
             self.progress_pct.emit(0)
             try:
-                results.extend(local_search.search_local(self.query, self.ev_cfg))
+                results.extend(local_search.search_local(
+                    self.query, self.ev_cfg, drives=self.local_drives))
             except Exception as e:  # noqa: BLE001
                 self.error_ready.emit(f"本地检索失败：{e}")
             if has_ima:
@@ -141,13 +161,16 @@ class SearchWorker(QThread):
         if has_ima:
             self.progress.emit("正在检索 ima 知识库…")
 
-            def _on_ima_progress(done: int, total: int):
+            def _on_ima_progress(done: int, total: int, result_count: int):
                 if total <= 0:
                     return
                 frac = done / total
                 # 本地占 20%，ima 占剩余 80%
                 pct = (20 + frac * 80) if has_local else (frac * 100)
                 self.progress_pct.emit(int(round(pct)))
+                # 额外给出可读进度：已检索 N/Y 个库，已得 M 条结果
+                self.progress.emit(
+                    f"正在检索 ima 知识库… 已检索 {done}/{total} 个库，已得 {result_count} 条结果")
 
             try:
                 ima_res, ima_errs = ima_search.search_ima(
@@ -156,6 +179,7 @@ class SearchWorker(QThread):
                     req_per_sec=self.ima_req_per_sec,
                     burst=self.ima_burst,
                     max_workers=self.ima_max_workers,
+                    kb_types=self.ima_kb_types,
                 )
                 results.extend(ima_res)
                 for e in ima_errs:
@@ -179,6 +203,7 @@ class MainWindow(QMainWindow):
         self.icon_provider = QFileIconProvider()  # 系统 shell 图标（与资源管理器/Everything 同源）
         self._kb_numeric_cache: dict = {}  # ima kb_id(base64) -> 数字 knowledgeBaseId 缓存
         self._ima_client_cache = None  # ima 电脑端是否可用（None=未探测）
+        self._ext_icon_cache: dict = {}  # 扩展名 -> 系统图标缓存（ima 结果按类型显示）
         self._init_ui()
         self._check_backends()
 
@@ -187,7 +212,8 @@ class MainWindow(QMainWindow):
 
         - 本地文件夹：文件夹图标
         - 本地文件：按扩展名取系统关联图标（路径不存在时回退通用文件图标）
-        - ima 文档：通用文档图标
+        - ima 文档：按标题扩展名取系统图标（与本地同名文件一致，如 PDF 显示 PDF 图标）；
+          无扩展名（如知识库条目）回退通用文档图标
         """
         if r.source == "local":
             if r.kind == "folder":
@@ -197,8 +223,32 @@ class MainWindow(QMainWindow):
             if ic.isNull():
                 ic = self.icon_provider.icon(QFileIconProvider.IconType.File)
             return ic
-        # ima 知识库文档：通用文档图标
+        # ima 结果：
+        #  - 文件夹 -> 文件夹图标（与本地一致）
+        #  - 文档 -> 按标题扩展名取系统图标；无扩展名回退通用文档图标
+        if r.kind == "folder":
+            return self.icon_provider.icon(QFileIconProvider.IconType.Folder)
+        ext = QFileInfo(r.title).suffix().lower()
+        if ext:
+            ic = self._ext_icon(ext)
+            if not ic.isNull():
+                return ic
         return self.icon_provider.icon(QFileIconProvider.IconType.File)
+
+    def _ext_icon(self, ext: str):
+        """按扩展名取系统关联图标（与资源管理器中同扩展名文件一致），按扩展名缓存。
+
+        QFileIconProvider 对不存在的路径会走 SHGFI_USEFILEATTRIBUTES，
+        仅凭扩展名即可拿到关联图标，因此用临时目录下的虚拟探测路径即可。
+        """
+        ic = self._ext_icon_cache.get(ext)
+        if ic is None:
+            info = QFileInfo(os.path.join(QDir.tempPath(), f"icon_probe.{ext}"))
+            ic = self.icon_provider.icon(info)
+            if ic.isNull():
+                ic = self.icon_provider.icon(QFileIconProvider.IconType.File)
+            self._ext_icon_cache[ext] = ic
+        return ic
 
     def _init_ui(self):
         self.setWindowTitle("统一检索：本地文件 + ima 知识库")
@@ -228,7 +278,7 @@ class MainWindow(QMainWindow):
         self.input.returnPressed.connect(self.on_search)
         self.btn_search = QPushButton("检索")
         self.btn_search.clicked.connect(self.on_search)
-        self.chk_local = QCheckBox("本地(Everything)")
+        self.chk_local = QCheckBox("本地")
         self.chk_local.setChecked(True)
         self.chk_ima = QCheckBox("ima 知识库")
         self.chk_ima.setChecked(True)
@@ -236,6 +286,40 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_search)
         top.addWidget(self.chk_local)
         top.addWidget(self.chk_ima)
+
+        # 本地盘符勾选面板：勾选「本地」后出现，限定本地检索范围（C盘 / E盘 等）。
+        # 默认全部勾选（等价于检索所有盘符）；取消某些盘符即只搜剩余盘符。
+        self.drive_panel = QWidget()
+        self.drive_row = QHBoxLayout(self.drive_panel)
+        self.drive_row.setContentsMargins(0, 0, 0, 0)
+        self.drive_row.addWidget(QLabel("盘符:"))
+        self.drive_chks: dict = {}
+        for d in _detect_drives():
+            cb = QCheckBox(f"{d}盘")
+            cb.setChecked(True)
+            cb.setProperty("drive", d)
+            self.drive_chks[d] = cb
+            self.drive_row.addWidget(cb)
+        self.chk_local.toggled.connect(self._on_local_toggled)
+        self.drive_panel.setVisible(self.chk_local.isChecked())
+        root.addWidget(self.drive_panel)
+
+        # 知识库类型勾选面板：勾选「ima 知识库」后出现，限定只检索指定类型的知识库。
+        # 默认三类全勾选（等价于检索全部类型）；取消某些类型即只搜剩余类型。
+        self.kbtype_panel = QWidget()
+        self.kbtype_row = QHBoxLayout(self.kbtype_panel)
+        self.kbtype_row.setContentsMargins(0, 0, 0, 0)
+        self.kbtype_row.addWidget(QLabel("知识库类型:"))
+        self.kbtype_chks: dict = {}
+        for label in ima_search.KB_TYPE_LABELS:
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setProperty("kbtype", label)
+            self.kbtype_chks[label] = cb
+            self.kbtype_row.addWidget(cb)
+        self.chk_ima.toggled.connect(self._on_ima_toggled)
+        self.kbtype_panel.setVisible(self.chk_ima.isChecked())
+        root.addWidget(self.kbtype_panel)
 
         # 排序选择器：对齐 Everything GUI 的排序列与方向
         top.addWidget(QLabel("排序："))
@@ -388,6 +472,8 @@ class MainWindow(QMainWindow):
             ima_max_workers=self.settings.ima_max_workers,
             ima_req_per_sec=self.settings.ima_req_per_sec,
             ima_burst=self.settings.ima_burst,
+            local_drives=self._selected_drives(),
+            ima_kb_types=self._selected_kb_types(),
         )
         self.worker.progress.connect(self.status.showMessage)
         self.worker.progress_pct.connect(self._on_progress_pct)
@@ -403,6 +489,35 @@ class MainWindow(QMainWindow):
         """更新状态栏百分比进度条。"""
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(max(0, min(100, pct)))
+
+    def _on_local_toggled(self, checked: bool):
+        """勾选/取消「本地」时显隐盘符选择面板。"""
+        self.drive_panel.setVisible(checked)
+
+    def _selected_drives(self) -> List[str]:
+        """返回当前勾选的盘符列表（如 ["C", "E"]）；全空时返回 []（搜全部）。"""
+        if not self.chk_local.isChecked():
+            return []
+        return [d for d, cb in self.drive_chks.items() if cb.isChecked()]
+
+    def _on_ima_toggled(self, checked: bool):
+        """勾选/取消「ima 知识库」时显隐知识库类型选择面板。"""
+        self.kbtype_panel.setVisible(checked)
+
+    def _selected_kb_types(self) -> Optional[List[str]]:
+        """返回当前勾选的知识库类型标签列表（如 ["个人知识库", "订阅知识库"]）。
+
+        - 未勾「ima 知识库」：返回 None（整块不检索）。
+        - 三类全选：返回 None，表示"检索全部类型"——保持原行为，且不会因出现
+          未知 base_type 的库而被误排除。
+        - 部分勾选 或 全不选([])：返回所勾列表（全不选即 []，表示不检索任何类型）。
+        """
+        if not self.chk_ima.isChecked():
+            return None
+        selected = [label for label, cb in self.kbtype_chks.items() if cb.isChecked()]
+        if set(selected) == set(ima_search.KB_TYPE_LABELS):
+            return None
+        return selected
 
     def _on_worker_error(self, msg: str):
         self.status.showMessage("⚠ " + msg)
@@ -535,7 +650,8 @@ class MainWindow(QMainWindow):
         """优先用 ima 电脑端深链打开；未装客户端则回退默认浏览器打开 browser_url。
 
         返回 True 表示走了 ima 客户端。深链形如
-        imacopilot://knowledgeDetail?knowledgeBaseId=..&mediaId=..（精准定位）。
+        imacopilot://open?url=chrome-extension://<KB扩展>/index.html?action=autoOpenMedia
+            &knowledgeBaseId=..&mediaId=..（精准定位到库内该篇文档）。
         """
         if self._ima_client_available():
             self._open_ima_deeplink(deeplink)
@@ -547,8 +663,8 @@ class MainWindow(QMainWindow):
     def _open_ima_deeplink(deeplink: str):
         """调起 ima 客户端打开深链。
 
-        用 os.startfile 走 ShellExecute，保留 imacopilot://knowledgeDetail 的原始大小写
-        （QUrl 会把 host 归一为小写 knowledgedetail，可能影响客户端匹配）。
+        用 os.startfile 走 ShellExecute，保留 imacopilot://open?url=... 的原始大小写
+        （QUrl 会把 host 归一为小写，可能影响客户端匹配）。
         """
         if os.name == "nt":
             os.startfile(deeplink)
@@ -613,16 +729,18 @@ class MainWindow(QMainWindow):
     def _open_ima(self, r: SearchResult):
         """双击/【打开】ima 结果：优先用 ima 电脑端精准打开该篇文档。
 
-        深链：imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>&mediaId=<媒体ID>
-        （数字 ID 由 get_kb_numeric_id 解析）。未装电脑端则回退：用 get_media_info 的
-        COS 直链在默认浏览器打开（PDF/图片预览，Office 下载）。失败回退 ima 网页。
+        深链：imacopilot://open?url=chrome-extension://<KB扩展>/index.html
+            ?action=autoOpenMedia&knowledgeBaseId=<数字ID>&mediaId=<媒体ID>
+        （数字 ID 由 get_kb_numeric_id 解析）。action=autoOpenMedia 是客户端“知识库页”
+        真正打开文档的开关；未装电脑端则回退：用 get_media_info 的 COS 直链在默认浏览器
+        打开（PDF/图片预览，Office 下载）。失败回退 ima 网页。
         """
         if not self.ima_cfg.has_credentials or not r.ref_id:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
             self.status.showMessage("未配置 ima 凭证或无文档 ID，已打开 ima 网页")
             return
 
-        # 装了电脑端：用 knowledgeDetail 深链精准定位到该篇
+        # 装了电脑端：用 open?url= 桥 + action=autoOpenMedia 精准打开该篇
         if self._ima_client_available() and r.kb_id:
             numeric = self._resolve_kb_numeric(r.kb_id)
             if numeric:

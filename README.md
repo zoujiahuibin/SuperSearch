@@ -7,6 +7,10 @@
 
 结果合并在同一张列表里，用**来源标签**区分（蓝色=本地，绿色=ima），支持按来源筛选、双击打开本地文件、查看 ima 高亮摘要。
 
+界面顶部勾选「ima 知识库」后会展开**知识库类型**勾选区（个人知识库 / 共享知识库 / 订阅知识库），默认三类全选（等于检索全部）；取消某类即只检索该类型知识库（按 ima 返回的 `base_type` 字段过滤）；**三类全不选则完全不检索 ima 知识库**。勾选「本地」后同理展开**盘符**勾选区，限定本地检索范围。
+
+> 注意：ima 对**订阅知识库**的「资料获取」有**每日额度限制**（错误码 220021，提示"资料获取次数已达上限，请明天再尝试"）。额度耗尽当日订阅库无法全文检索，个人知识库不受影响；次日额度恢复后订阅库即可正常检索。程序会把这类重复报错合并成一条明确提示，不会刷屏。
+
 底部**状态栏**在检索进行时显示**百分比进度条**（格式 `%p%`，如 `45%`）：其中本地检索（Everything，较快）占前 20%，ima 跨知识库检索（较慢，逐库推进）占后 80%；检索完成进度条自动归 100% 并隐藏，左侧文本显示"共 N 条结果"。
 
 结果表格的**每一列宽度都可由用户拖动表头边界手动调整**（列为 `QHeaderView.Interactive` 模式，而非自动拉伸）；表头还支持**拖动换列顺序**。首次填充结果时会按内容自适应一次列宽，之后尊重你的手动调整（切换来源筛选或再次检索都不会覆盖）。
@@ -96,14 +100,14 @@ venv/Scripts/python.exe main.py
 
 1. **前置就绪**：确认 Everything 已启用 HTTP 服务器（见「前置条件」），ima 凭证已配置（见「前置条件 / 设置」）。
 2. **检索**：在顶部输入框键入关键词，回车或点「检索」，即同时搜索本地文件与 ima 知识库。
-3. **选择来源**：用「本地(Everything)」「ima 知识库」两个勾选框控制是否检索对应来源。
+3. **选择来源**：用「本地」「ima 知识库」两个勾选框控制是否检索对应来源。勾选「本地」后，下方出现**盘符**勾选区（C盘 / D盘 / E盘…，自动探测本机已挂载盘符），默认全选即检索全部盘符；取消某些盘符（如只勾 C盘、E盘）即只在这几个盘符内检索本地文件。盘符过滤通过 Everything 的 `path:` 语法实现（多盘符用 OR 组合）。
 4. **排序**：「排序」下拉框切换 名称/路径/大小/修改时间 × 升/降，与 Everything GUI 排序列一致（服务端排序，名称是自然序）。
 5. **筛选**：结果区下方「筛选」下拉可只看 全部 / 本地 / ima。
 6. **打开**：**双击**本地结果会用系统默认程序打开（文件则打开文件、否则打开所在文件夹）；**双击 ima 结果**会取其真实直链，**优先用 ima 电脑端打开**（未安装电脑端则用默认浏览器：PDF / 图片直接预览，Office 等下载到本地）——需已配置 ima 凭证，取不到直链时回退为打开 ima 网页。也可在任一行上**右键**，选：
    - **打开**：与双击效果相同；
    - **打开路径**：本地结果打开其**所在文件夹**（即“路径”列所示的目录；文件夹结果则打开该文件夹本身）；ima 结果**优先用 ima 电脑端打开该知识库**（未装电脑端则打开网页 `https://ima.qq.com/wikis?knowledgeBaseId=<数字ID>`）——程序会自动经 `get_knowledge_list` 根目录解析出网页端数字 ID（OpenAPI 只给 base64 kb_id，无法直接用于网页），并按库缓存；解析失败则回退打开 ima 网页。
 
-> ima 电脑端深链（经 REA 客户端逆向确认）：安装 ima.copilot 客户端后注册 `imacopilot://` 协议。**打开路径（知识库）**复刻客户端原生 `TQ` 桥：`imacopilot://open?url=chrome-extension://nkohmbngmopdajidckglcoehlaeepeoi/index.html?knowledgeBaseId=<数字ID>`；**打开（文档）**复刻客户端原生 `xQ` 桥：`imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>&mediaId=<媒体ID>&launchChannel=10000154`。其中数字 ID 由 `get_knowledge_list` 根目录 `folder_id` 解析（客户端本地缓存证实其内部用数字 knowledgeBaseId，而非 OpenAPI 的 base64 kb_id）。深链经 `os.startfile` 调起并保留大小写；未安装客户端时自动回退默认浏览器（对分发到其它机器也稳妥）。
+> ima 电脑端深链（经 REA 客户端逆向确认）：安装 ima.copilot 客户端后注册 `imacopilot://` 协议。**打开路径（知识库）**复刻客户端原生 `TQ` 桥：`imacopilot://open?url=chrome-extension://nkohmbngmopdajidckglcoehlaeepeoi/index.html?knowledgeBaseId=<数字ID>`；**打开（文档）**复用同一 `open?url=` 桥，并在内层地址显式带上 `action=autoOpenMedia`：`imacopilot://open?url=chrome-extension://nkohmbngmopdajidckglcoehlaeepeoi/index.html?action=autoOpenMedia&knowledgeBaseId=<数字ID>&mediaId=<媒体ID>`。关键：客户端「知识库页」(扩展 `nkohmbngmopdajidckglcoehlaeepeoi` 的 `index-Bdu-6Zli.js`) 仅在 `action===autoOpenMedia` 且 `knowledgeBaseId` 与 `mediaId` 同时存在时才会真正打开该篇文档（`k()` 函数：`if(!(wr()===it.AutoOpenMedia&&!!H&&!!y))return`）；`knowledgeDetail` 协议不会注入该 action，故文档必须用 `open?url=` 桥显式携带 `action=autoOpenMedia`。数字 ID 由 `get_knowledge_list` 根目录 `folder_id` 解析（客户端本地缓存证实其内部用数字 knowledgeBaseId，而非 OpenAPI 的 base64 kb_id）。深链经 `os.startfile` 调起并保留大小写；未安装客户端时自动回退默认浏览器（对分发到其它机器也稳妥）。
 7. **查看详情**：单击任一行，底部显示路径 / 大小 / 时间，或 ima 高亮摘要。
 8. **设置**（菜单栏「设置」）：
    - **文件格式排序…**：自定义扩展名优先级，让结果按你设定的格式顺序排列。

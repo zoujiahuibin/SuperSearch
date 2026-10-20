@@ -57,16 +57,47 @@ def _filetime_to_datetime(ft) -> datetime:
         return None
 
 
-def search_local(query: str, cfg: EverythingConfig) -> List[SearchResult]:
+def _build_drive_filter(drives) -> str:
+    """把勾选的盘符拼成 Everything 的 path: 过滤表达式。
+
+    实测结论（2026-10-20，Everything HTTP Server 1.4）：
+      - 必须是 `path:C:`（带冒号、**不带**结尾反斜杠），`path:C:\\` 会匹配 0 条；
+      - 多盘用 `path:C: | path:E:`（空格分隔、**不要**外层括号），
+        写成 `(path:C: | path:E:)` 反而会被 Everything 整体忽略（返回全部盘符）。
+    因此这里：盘符统一规范成 `X:`（接受 "C" 或 "C:" 两种输入），
+    多盘直接用空格 + `|` 连接，不套括号。
+
+    drives 形如 ["C", "E"] 或 ["C:", "E:"]；为空则返回 ""（不限定，搜全部盘符）。
+    """
+    if not drives:
+        return ""
+    parts = []
+    for d in drives:
+        d = str(d).strip().upper()
+        if not d:
+            continue
+        if not d.endswith(":"):
+            d += ":"
+        parts.append(f"path:{d}")
+    if not parts:
+        return ""
+    return " | ".join(parts)
+
+
+def search_local(query: str, cfg: EverythingConfig, drives: List[str] = None) -> List[SearchResult]:
     """查询 Everything HTTP Server，返回本地文件结果列表。
 
-    失败时抛出 requests 异常（连接失败等），由调用方捕获并展示提示。
+    drives 为勾选的盘符列表（如 ["C:", "E:]），非空时仅检索这些盘符；
+    为空则检索全部盘符（默认行为）。失败时抛出 requests 异常，由调用方捕获。
     """
     if not query or not query.strip():
         return []
 
+    drive_filter = _build_drive_filter(drives)
+    search_query = f"{query.strip()} {drive_filter}".strip() if drive_filter else query.strip()
+
     params = {
-        "search": query.strip(),
+        "search": search_query,
         "json": 1,
         "count": cfg.count,
         "sort": cfg.sort_key,

@@ -141,6 +141,46 @@ class TestLocalSearch(unittest.TestCase):
         self.assertEqual(res[0].kind, "file")
         self.assertEqual(res[1].kind, "folder")
 
+    def test_build_drive_filter(self):
+        # 空 -> 不限定（搜全部盘符）
+        self.assertEqual(local_search._build_drive_filter([]), "")
+        self.assertEqual(local_search._build_drive_filter(None), "")
+        # 单盘：必须是 path:C:（带冒号、无结尾反斜杠）；
+        # 旧写法 path:C:\ 会被 Everything 匹配成 0 条，必须避免。
+        self.assertEqual(local_search._build_drive_filter(["C"]), "path:C:")
+        self.assertEqual(local_search._build_drive_filter(["C:"]), "path:C:")
+        self.assertEqual(local_search._build_drive_filter(["c:"]), "path:C:")
+        # 多盘：空格 + | 连接、不套括号（(path:C: | path:F:) 会被 Everything 整体忽略）
+        self.assertEqual(
+            local_search._build_drive_filter(["C", "F"]),
+            "path:C: | path:F:",
+        )
+        self.assertEqual(
+            local_search._build_drive_filter(["C:", "E:", "F:"]),
+            "path:C: | path:E: | path:F:",
+        )
+        # 含空/非法项应被跳过
+        self.assertEqual(
+            local_search._build_drive_filter(["C", "", "  "]),
+            "path:C:",
+        )
+
+    def test_search_local_applies_drive_filter(self):
+        # 勾选 C/F 时，search 参数必须含 path:C: | path:F:，且不应有多余反斜杠/括号
+        captured = {}
+
+        def fake_get(url, params=None, timeout=None, proxies=None):
+            captured["params"] = params
+            fr = mock.Mock()
+            fr.json.return_value = {"totalResults": 0, "results": []}
+            fr.raise_for_status.return_value = None
+            return fr
+
+        with mock.patch.object(local_search.requests, "get", side_effect=fake_get):
+            local_search.search_local("apple", cfg_mod.load_everything_config(),
+                                     drives=["C", "F"])
+        self.assertEqual(captured["params"]["search"], "apple path:C: | path:F:")
+
 
 class TestSettings(unittest.TestCase):
     def test_default(self):
@@ -301,14 +341,134 @@ class TestImaSearch(unittest.TestCase):
             f = mock.Mock()
             f.status_code = 200
             f.json.return_value = {"code": 0, "msg": "ok",
-                                   "data": {"info_list": [{"id": "kb1", "name": "KB1"}],
+                                   "data": {"info_list": [{"id": "kb1", "name": "KB1",
+                                                          "base_type": "个人知识库"}],
                                             "is_end": True, "next_cursor": ""}}
             f.raise_for_status.return_value = None
             return f
 
         with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
             kbs = ima_search.list_knowledge_bases(self._cfg(), "q")
-        self.assertEqual(kbs, [{"id": "kb1", "name": "KB1"}])
+        self.assertEqual(kbs, [{"id": "kb1", "name": "KB1", "base_type": "个人知识库"}])
+
+    def test_kb_matches_types(self):
+        # 子串匹配：base_type 含对应关键字即命中
+        self.assertTrue(ima_search._kb_matches_types(
+            {"base_type": "个人知识库"}, ["个人知识库"]))
+        self.assertTrue(ima_search._kb_matches_types(
+            {"base_type": "我加入的订阅知识库"}, ["订阅知识库"]))
+        self.assertFalse(ima_search._kb_matches_types(
+            {"base_type": "个人知识库"}, ["订阅知识库"]))
+        # None -> 命中全部（不限类型）
+        self.assertTrue(ima_search._kb_matches_types({"base_type": "x"}, None))
+        # [] -> 全不选，命中 none（不检索任何类型）
+        self.assertFalse(ima_search._kb_matches_types({"base_type": "x"}, []))
+        # 未知 base_type + 全选标签 -> 命中 none（保持"全选=不限"语义，不误排除）
+        self.assertFalse(ima_search._kb_matches_types(
+            {"base_type": "团队知识库"}, ["个人知识库", "共享知识库", "订阅知识库"]))
+
+    def test_search_ima_type_filter(self):
+        # 只选「个人知识库」时，应只检索个人库，跳过订阅库
+        searched = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            if url.endswith("search_knowledge_base"):
+                data = {"info_list": [
+                    {"id": "kb1", "name": "Personal", "base_type": "个人知识库"},
+                    {"id": "kb2", "name": "Sub", "base_type": "我加入的订阅知识库"},
+                ], "is_end": True, "next_cursor": ""}
+            elif url.endswith("search_knowledge"):
+                searched.append(json.get("knowledge_base_id"))
+                data = {"info_list": [{"media_id": "m1", "title": "Doc"}],
+                        "is_end": True, "next_cursor": ""}
+            f.json.return_value = {"code": 0, "msg": "ok", "data": data}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            res, errs = ima_search.search_ima("q", self._cfg(), kb_types=["个人知识库"])
+        self.assertEqual(searched, ["kb1"])
+        self.assertEqual(errs, [])
+
+    def test_search_ima_type_filter_all_none(self):
+        # kb_types=None（全选）时不限类型，两类都检索
+        searched = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            if url.endswith("search_knowledge_base"):
+                data = {"info_list": [
+                    {"id": "kb1", "name": "Personal", "base_type": "个人知识库"},
+                    {"id": "kb2", "name": "Sub", "base_type": "我加入的订阅知识库"},
+                ], "is_end": True, "next_cursor": ""}
+            elif url.endswith("search_knowledge"):
+                searched.append(json.get("knowledge_base_id"))
+                data = {"info_list": [], "is_end": True, "next_cursor": ""}
+            f.json.return_value = {"code": 0, "msg": "ok", "data": data}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            res, errs = ima_search.search_ima("q", self._cfg(), kb_types=None)
+        self.assertEqual(set(searched), {"kb1", "kb2"})
+        self.assertEqual(errs, [])
+
+    def test_search_ima_type_filter_empty_list_searches_nothing(self):
+        # kb_types=[]（全不选）时不应检索任何库
+        searched = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            if url.endswith("search_knowledge_base"):
+                data = {"info_list": [
+                    {"id": "kb1", "name": "Personal", "base_type": "个人知识库"},
+                ], "is_end": True, "next_cursor": ""}
+            else:
+                searched.append(json.get("knowledge_base_id"))
+                data = {"info_list": [], "is_end": True, "next_cursor": ""}
+            f.json.return_value = {"code": 0, "msg": "ok", "data": data}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            res, errs = ima_search.search_ima("q", self._cfg(), kb_types=[])
+        self.assertEqual(searched, [])          # 没有任何库被检索
+        self.assertEqual(res, [])
+
+    def test_search_ima_subscription_quota_consolidated(self):
+        # 订阅库全部命中"资料获取额度"(220021)时，errors 应合并为一条清晰提示，
+        # 而非每个库刷一条；个人库真实错误仍单独显示。
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            if url.endswith("search_knowledge_base"):
+                data = {"info_list": [
+                    {"id": "kb1", "name": "Personal", "base_type": "个人知识库"},
+                    {"id": "kb2", "name": "SubA", "base_type": "我加入的订阅知识库"},
+                    {"id": "kb3", "name": "SubB", "base_type": "我加入的订阅知识库"},
+                ], "is_end": True, "next_cursor": ""}
+            elif url.endswith("search_knowledge"):
+                kid = json.get("knowledge_base_id")
+                if kid == "kb1":
+                    data = {"info_list": [{"media_id": "m1", "title": "Doc"}],
+                            "is_end": True, "next_cursor": ""}
+                else:
+                    raise ima_search.ImaApiError("资料获取次数已达上限，请明天再尝试",
+                                                ima_search.KB_QUOTA_EXCEEDED_CODE)
+            f.json.return_value = {"code": 0, "msg": "ok", "data": data}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            res, errs = ima_search.search_ima("q", self._cfg())
+        self.assertEqual(len(res), 1)  # 个人库仍出结果
+        self.assertEqual(len(errs), 1)  # 两条订阅配额错误合并为一条
+        self.assertIn("订阅知识库", errs[0])
+        self.assertIn("资料获取", errs[0])
 
     def test_search_ima(self):
         def fake_post(url, json=None, headers=None, timeout=None):
@@ -391,11 +551,11 @@ class TestImaSearch(unittest.TestCase):
         self.assertIn("请求频率超限", errs[0])
 
     def test_search_ima_progress_callback(self):
-        # progress_callback 应在每个知识库检索完成后回调 (done, total)
+        # progress_callback 应在每个知识库检索完成后回调 (done, total, result_count)
         seen = []
 
-        def cb(done, total):
-            seen.append((done, total))
+        def cb(done, total, result_count):
+            seen.append((done, total, result_count))
 
         def fake_post(url, json=None, headers=None, timeout=None):
             f = mock.Mock()
@@ -412,7 +572,78 @@ class TestImaSearch(unittest.TestCase):
         with mock.patch.object(ima_search.requests, "post", side_effect=fake_post), \
                 mock.patch.object(ima_search.time, "sleep", return_value=None):
             res, errs = ima_search.search_ima("q", self._cfg(), progress_callback=cb)
-        self.assertEqual(seen, [(1, 2), (2, 2)])
+        # 两个库均无结果 -> result_count 均为 0
+        self.assertEqual(seen, [(1, 2, 0), (2, 2, 0)])
+        self.assertEqual(errs, [])
+
+    def test_search_ima_progress_callback_counts_results(self):
+        # result_count 应随结果累计增长，最终等于总结果数
+        seen = []
+
+        def cb(done, total, result_count):
+            seen.append(result_count)
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            if url.endswith("search_knowledge_base"):
+                data = {"info_list": [{"id": "kb1", "name": "KB1"}, {"id": "kb2", "name": "KB2"}],
+                        "is_end": True, "next_cursor": ""}
+            else:
+                data = {"info_list": [{"media_id": "m1", "title": "Doc", "highlight_content": "x"}],
+                        "is_end": True, "next_cursor": ""}
+            f.json.return_value = {"code": 0, "msg": "ok", "data": data}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post), \
+                mock.patch.object(ima_search.time, "sleep", return_value=None):
+            res, errs = ima_search.search_ima("q", self._cfg(), progress_callback=cb)
+        self.assertEqual(len(res), 2)  # 两个库各 1 条
+        self.assertEqual(max(seen), 2)  # 最终 result_count 累计到总结果数
+        self.assertEqual(errs, [])
+
+    def test_ima_item_is_folder(self):
+        # 真实接口：文件夹 media_type==99 且 media_id 以 "folder_" 开头
+        self.assertTrue(ima_search._ima_item_is_folder(
+            {"media_id": "folder_7451978045092421", "media_type": 99, "title": "model averaging"}, "folder_7451978045092421"))
+        self.assertTrue(ima_search._ima_item_is_folder({"media_type": 99, "media_id": "m"}, "m"))
+        self.assertTrue(ima_search._ima_item_is_folder({"media_id": "folder_xxx"}, "folder_xxx"))
+        # 空 media_id（兜底）
+        self.assertTrue(ima_search._ima_item_is_folder({"title": "sub"}, ""))
+        # 文档：PDF media_type==1 / 笔记 media_type==11 -> 非文件夹
+        self.assertFalse(ima_search._ima_item_is_folder(
+            {"media_id": "pdf_abc", "media_type": 1, "title": "a.pdf"}, "pdf_abc"))
+        self.assertFalse(ima_search._ima_item_is_folder(
+            {"media_id": "note_abc", "media_type": 11, "title": "note"}, "note_abc"))
+
+    def test_search_ima_folder_detected(self):
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            data = {}
+            if url.endswith("search_knowledge_base"):
+                data = {"info_list": [{"id": "kb1", "name": "KB1"}], "is_end": True, "next_cursor": ""}
+            elif url.endswith("search_knowledge"):
+                # 一条文档(m1) + 一条文件夹(无 media_id)
+                data = {"info_list": [
+                    {"media_id": "m1", "title": "Doc.pdf", "highlight_content": "<em>q</em>"},
+                    {"title": "子文件夹", "parent_folder_id": "f1"},
+                ], "is_end": True, "next_cursor": ""}
+            f.json.return_value = {"code": 0, "msg": "ok", "data": data}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            res, errs = ima_search.search_ima("q", self._cfg())
+        self.assertEqual(len(res), 2)
+        docs = [r for r in res if r.kind != "folder"]
+        folders = [r for r in res if r.kind == "folder"]
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0].title, "Doc.pdf")
+        self.assertEqual(len(folders), 1)
+        self.assertEqual(folders[0].title, "子文件夹")
+        self.assertEqual(folders[0].ref_id, "")
         self.assertEqual(errs, [])
 
     def test_get_kb_numeric_id(self):
@@ -465,11 +696,15 @@ class TestImaSearch(unittest.TestCase):
             "nkohmbngmopdajidckglcoehlaeepeoi/index.html?knowledgeBaseId=7451978007345957")
 
     def test_ima_client_doc_url(self):
+        # 文档深链必须复用 open?url= 桥并显式带 action=autoOpenMedia，
+        # 否则客户端“知识库页”只会定位到库而不会打开该篇文档。
         d = ima_search.ima_client_doc_url("7451978007345957", "pdf_abc_123")
         self.assertEqual(
             d,
-            "imacopilot://knowledgeDetail?knowledgeBaseId=7451978007345957"
-            "&mediaId=pdf_abc_123&launchChannel=10000154")
+            "imacopilot://open?url=chrome-extension://"
+            "nkohmbngmopdajidckglcoehlaeepeoi/index.html"
+            "?action=autoOpenMedia&knowledgeBaseId=7451978007345957"
+            "&mediaId=pdf_abc_123")
 
 
 if __name__ == "__main__":
