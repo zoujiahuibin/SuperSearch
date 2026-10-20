@@ -2,8 +2,8 @@
 # 用法：PyInstaller ... --version-file version_info.txt main.py
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 2, 0, 0),
-    prodvers=(1, 2, 0, 0),
+    filevers=(1, 2, 1, 0),
+    prodvers=(1, 2, 1, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -19,12 +19,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'Jiahui Zou'),
             StringStruct('FileDescription', 'SuperSearch - unified search for local files (Everything) and ima knowledge base'),
-            StringStruct('FileVersion', '1.2.0.0'),
+            StringStruct('FileVersion', '1.2.1.0'),
             StringStruct('InternalName', 'SuperSearch'),
             StringStruct('LegalCopyright', 'MIT'),
             StringStruct('OriginalFilename', 'SuperSearch.exe'),
             StringStruct('ProductName', 'SuperSearch'),
-            StringStruct('ProductVersion', '1.2.0.0'),
+            StringStruct('ProductVersion', '1.2.1.0'),
           ],
         )
       ]

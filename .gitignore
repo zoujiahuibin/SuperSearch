@@ -22,3 +22,10 @@ Thumbs.db
 
 # WorkBuddy 等本地工作区数据
 .workbuddy/
+
+# Everything 运行时数据库（由内置实例在 %LOCALAPPDATA% 生成；vendor 下的副本是测试残留）
+vendor/Everything/*.db*
+
+# 未使用 / 冗余素材（有意不入库）
+assets/logo2.png
+vendor/Everything-x64.zip

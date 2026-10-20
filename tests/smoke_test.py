@@ -8,6 +8,7 @@
 import os
 import sys
 import unittest
+import subprocess
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -732,6 +733,56 @@ class TestEvBundler(unittest.TestCase):
         self.assertIn("http_server=1", content)
         self.assertIn("http_server_port=8180", content)
         self.assertIn("db_path=", content)
+        # 后台/标准用户运行：不弹管理员对话框、不触发 UAC、无托盘图标、无窗口
+        self.assertIn("run_as_admin=0", content)
+        self.assertIn("run_in_background=1", content)
+        self.assertIn("show_tray_icon=0", content)
+        self.assertIn("auto_include_fixed_volumes=1", content)
+        self.assertIn("check_for_updates_on_startup=0", content)
+
+    def test_service_installed_uses_sc_query(self):
+        # returncode==0 -> 已安装；非 0 -> 未安装；异常 -> False
+        with mock.patch.object(ev_bundler.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0)):
+            self.assertTrue(ev_bundler.service_installed())
+        with mock.patch.object(ev_bundler.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 1060)):
+            self.assertFalse(ev_bundler.service_installed())
+        with mock.patch.object(ev_bundler.subprocess, "run", side_effect=OSError("no sc")):
+            self.assertFalse(ev_bundler.service_installed())
+
+    def test_install_service_uses_stable_exe(self):
+        # 安装服务必须从持久化稳定目录执行（_MEIPASS 会被清理），并调用 -install-service
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch.object(ev_bundler, "bundled_everything_exe",
+                               return_value="X:/meipass/Everything/everything.exe"), \
+                mock.patch.object(ev_bundler, "_ensure_stable_exe",
+                                  return_value="X:/localappdata/everything.exe") as m_stable, \
+                mock.patch.object(ev_bundler.subprocess, "run", side_effect=fake_run):
+            ok, err = ev_bundler.install_service()
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        m_stable.assert_called_once()
+        self.assertEqual(seen["cmd"][-1], "-install-service")
+        self.assertEqual(seen["cmd"][0], "X:/localappdata/everything.exe")
+
+    def test_uninstall_service_best_effort(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch.object(ev_bundler, "bundled_everything_exe",
+                               return_value="X:/meipass/Everything/everything.exe"), \
+                mock.patch.object(ev_bundler.subprocess, "run", side_effect=fake_run):
+            ev_bundler.uninstall_service()  # 不抛异常即通过
+        self.assertEqual(seen["cmd"][-1], "-uninstall-service")
 
     def test_bundled_everything_exe_dev_path(self):
         # 开发环境：回退到仓库 vendor/Everything/everything.exe

@@ -851,6 +851,19 @@ def main():
     # 卸载清理钩子：仅退出内置 Everything 实例并立即退出，不启动 GUI
     if "--quit-everything" in sys.argv:
         sys.exit(_quit_bundled_everything())
+    # 安装器（已提权）调用：安装 Everything 服务后立即退出，不启动 GUI。
+    # 装了服务，标准用户客户端即可经服务索引 NTFS，从此不弹“需要管理员权限”
+    # 对话框、也不触发 UAC。
+    if "--install-everything-service" in sys.argv:
+        ok, err = ev_bundler.install_service()
+        if not ok and err:
+            print(err, file=sys.stderr)
+        sys.exit(0 if ok else 1)
+    # 卸载清理钩子：卸载 Everything 服务后立即退出（-uninstall-service 按服务名
+    # 经 SCM 移除，与用哪个副本执行无关）。
+    if "--uninstall-everything-service" in sys.argv:
+        ev_bundler.uninstall_service()
+        sys.exit(0)
 
     app = QApplication([])
     # 统一设置应用图标（窗口标题栏 / 任务栏 / 托盘共用），从 .ico 加载

@@ -2,7 +2,7 @@
 
 一个独立的桌面 GUI（PySide6），同时检索：
 
-- **本地文件**：通过 Everything HTTP Server。v1.2.0 起**内置 Everything 便携版**（随 exe 打包，首次运行自动拉起），无需单独安装 Everything。
+- **本地文件**：通过 Everything HTTP Server。v1.2.0 起**内置 Everything 便携版**（随 exe 打包，首次运行自动拉起），无需单独安装 Everything。v1.2.1 起安装器会装好 **Everything 服务**，内置实例改为**后台无界面**运行——不再弹“需要管理员权限索引 NTFS”对话框，也不再显示 Everything 窗口/托盘图标。
 - **ima 知识库文档/笔记**：通过 ima 官方 OpenAPI。
 
 结果合并在同一张列表里，用**来源标签**区分（蓝色=本地，绿色=ima），支持按来源筛选、双击打开本地文件、查看 ima 高亮摘要。
@@ -28,7 +28,7 @@
 | 操作系统 | **Windows**（推荐） | 本地检索依赖 Everything HTTP Server；文件图标走 Windows shell 图标，故与 Everything / 资源管理器一致。ima 检索跨平台可用，但未在 macOS/Linux 验证。 |
 | Python | **3.9+**（开发用 3.10） | 需能安装 PySide6 6.x。 |
 | 依赖 | `PySide6>=6.5`、`requests>=2.28` | 见 `requirements.txt`，用 `pip install -r requirements.txt` 安装。 |
-| Everything | 1.4+（已内置） | 仅本地检索需要。v1.2.0 起程序已内置 Everything 便携版并自动拉起其 HTTP Server（默认 `127.0.0.1:80`，被占用则退 8180）；若本机已装并启用了 Everything HTTP 服务，则直接复用，不再重复拉起。 |
+| Everything | 1.4+（已内置） | 仅本地检索需要。v1.2.0 起程序已内置 Everything 便携版并自动拉起其 HTTP Server（默认 `127.0.0.1:80`，被占用则退 8180）；若本机已装并启用了 Everything HTTP 服务，则直接复用，不再重复拉起。v1.2.1 起安装器安装 Everything 服务（需管理员），内置实例以 `-startup` 后台运行、无窗口、无托盘图标。 |
 | 网络 | 需能访问 `ima.qq.com` | 仅 ima 检索需要；本地检索纯内网。 |
 | ima 凭证 | Client ID / API Key | 仅 ima 检索需要，在 [ima 开放平台](https://ima.qq.com/agent-interface) 申请。 |
 
@@ -116,11 +116,12 @@ venv/Scripts/python.exe main.py
 9. **进度**：底部状态栏在检索时显示百分比进度条，完成显示"共 N 条结果"。
 10. **表格**：结果表格每列宽可拖动调整，表头还可拖动换列序。
 11. **系统托盘**：关闭主窗口不会退出程序，而是**最小化到 Windows 右下角系统托盘**（状态栏提示"已最小化到系统托盘，右键托盘图标可退出"）。**双击托盘图标**或右键菜单「显示主窗口」可恢复窗口；右键菜单「退出 SuperSearch」才真正退出程序（退出时会一并关掉内置 Everything 便携版）。
+12. **Everything 后台静默运行**：内置 Everything 以 `-startup` 方式在后台提供 HTTP 检索服务，**不显示其搜索窗口、也无托盘图标**；NTFS 索引经由安装器装好的 Everything 服务完成，因此**不会弹出“需要管理员权限索引 NTFS”对话框、也不触发 UAC**。
 
 ### 运行测试
 
 ```bash
-venv/Scripts/python.exe tests/smoke_test.py   # 51 项纯逻辑冒烟测试（含系统托盘逻辑）
+venv/Scripts/python.exe tests/smoke_test.py   # 54 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑）
 # 可选：无界面验证 GUI 可构造
 QT_QPA_PLATFORM=offscreen venv/Scripts/python.exe tests/verify_gui.py
 ```
@@ -180,6 +181,14 @@ SuperSearch.iss         Inno Setup 安装脚本（用于生成 setup.exe，见�
 本项目用 **PyInstaller** 打成单文件、无控制台的 Windows 程序（已内置 PySide6 运行库，
 目标机器无需安装 Python / PySide6，双击即用；原项目源码不受影响，仅输出到 `dist/`）。
 
+**v1.2.1 起后台静默 + Everything 服务**：内置实例改用 `-startup` 后台启动（不显示搜索窗口），
+ini 写入 `run_as_admin=0` / `run_in_background=1` / `show_tray_icon=0` / `auto_include_fixed_volumes=1`，
+实现完全无界面、且不触发 UAC / 管理员对话框。NTFS 索引改由 **Everything 服务** 提供：安装器
+（`SuperSearch.iss`，`PrivilegesRequired=admin`）在装包时以提权方式执行
+`SuperSearch.exe --install-everything-service`（内部 `everything.exe -install-service`，服务以 SYSTEM
+后台运行、无界面），卸载时经 `--uninstall-everything-service` 移除；服务缺失时应用也会尝试补装一次
+（标准用户触发一次性 UAC）。`core/ev_bundler.py` 相应新增 `service_installed/install_service/uninstall_service`。
+
 **v1.2.0 起内置 Everything 便携版**：`vendor/Everything/`（官方 zip，未改动）随包打进
 `dist/SuperSearch.exe`，运行 / 检索时由 `core/ev_bundler.py` 自动探测并拉起内置 Everything
 （独立实例名 `SuperSearch`，其配置写入 `http_server=1` 即**自动开启 HTTP 服务**，端口优先 80、
@@ -194,7 +203,8 @@ SuperSearch.iss         Inno Setup 安装脚本（用于生成 setup.exe，见�
 ### 已产出
 - `dist/SuperSearch.exe` —— 单文件可执行程序（约 50 MB，已内嵌 Everything）。直接双击运行。
 - `dist/SuperSearch-Setup.exe` —— Inno Setup 安装包（含应用图标、默认勾选的桌面快捷方式、
-  可选安装路径）。双击安装即可，安装过程仅复制一个 exe（Everything 已内嵌其中）。
+  可选安装路径）。v1.2.1 起安装器**需要管理员权限**（用于安装 Everything 服务，使本地检索不再弹
+  管理员对话框）；安装时会复制 exe 并以提权方式装好 Everything 服务，卸载时一并移除。
 
 ### 自行重新打包
 ```bash
@@ -203,7 +213,7 @@ venv/Scripts/python.exe -m PyInstaller --noconfirm --clean build/SuperSearch.spe
 #  → dist/SuperSearch.exe（已带应用图标、版本信息、内嵌 Everything）
 ```
 > 说明：`build/SuperSearch.spec` 已固定图标（`assets/SuperSearch.ico`）、版本文件
-> （`version_info.txt`，现为 1.2.0）、并把 `vendor/Everything` 作为 data 文件打进包内；
+> （`version_info.txt`，现为 1.2.1）、并把 `vendor/Everything` 作为 data 文件打进包内；
 > 不需要手动加 `--add-data` 或 `--icon`。PyInstaller 的 PySide6 钩子会自动带上 Qt 平台插件。
 
 ### 生成"可安装"的 setup.exe

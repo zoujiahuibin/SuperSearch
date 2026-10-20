@@ -12,10 +12,18 @@
 Everything 命令行（1.4 官方支持）：
   -instance <name>  使用独立实例（独立窗口类/互斥体，避免与用户已装的 Everything 冲突）
   -config <path>    使用指定 ini（数据库等数据文件默认写在该 ini 同目录，普通用户可写）
+  -startup          后台运行，不显示任何搜索窗口（voidtools 官方选项）；配合 ini 的
+                    show_tray_icon=0 可做到完全无界面，HTTP 服务由 ini 的 http_server=1 启用。
 
-NTFS 索引需要管理员权限或 Everything 服务：安装器在装包时若检测到系统没有
-Everything 服务，会静默执行 `everything.exe -install-service` + `-start-service`
-（见 SuperSearch.iss）；无服务时 Everything 仍可用（文件夹索引模式，仅较慢）。
+NTFS 索引需要管理员权限或 Everything 服务。为避免每次启动都弹
+“需要管理员权限索引 NTFS 卷”对话框、也不触发 UAC，做法是：
+  1) 安装一次 Everything 服务（`everything.exe -install-service`，需管理员；安装器在
+     提权环境下静默完成，见 SuperSearch.iss）。服务以 SYSTEM 后台运行、无界面，负责
+     读取 NTFS MFT/USN。
+  2) 应用以标准用户 + `run_as_admin=0` 启动 `-startup` 客户端：经服务取得 NTFS 索引，
+     既不弹管理员对话框，也不显示窗口。
+服务缺失时（如便携/免安装运行）由 ensure_everything_running 尝试补装一次
+（标准用户会触发一次性 UAC，装好后即永久生效）。
 """
 from __future__ import annotations
 
@@ -49,6 +57,9 @@ DEFAULT_WAIT_SECONDS = 20.0
 # 防止重复启动内置实例（模块级守卫；Everything 对同一 instance 本身也有互斥，双保险）
 _launch_lock = threading.Lock()
 _launched = False
+
+# 同一进程内是否已尝试过安装 Everything 服务（避免一次启动内重复触发 UAC）
+_service_install_attempted = False
 
 
 def appdata_dir() -> str:
@@ -137,6 +148,13 @@ def write_bundled_ini(port: int, base_dir: Optional[str] = None) -> str:
 
     只写必要键：Everything 读取时对缺失键用默认值；未知键会被忽略（无害）。
     数据（数据库等）默认写在 ini 同目录（%LOCALAPPDATA%，普通用户可写）。
+
+    以后台/标准用户方式运行（配合 -startup 与 Everything 服务）：
+      run_as_admin=0            不自动提权重启 → 不触发 UAC / “以管理员身份运行”
+      run_in_background=1       关闭搜索窗口后仍驻留后台（持续提供 HTTP 服务）
+      show_tray_icon=0          不显示通知区域托盘图标（配合 -startup 完全无界面）
+      auto_include_fixed_volumes=1  自动纳入固定 NTFS 卷（经服务读取 MFT/USN）
+      check_for_updates_on_startup=0  关闭启动更新检查，避免额外弹窗
     """
     d = base_dir or appdata_dir()
     os.makedirs(d, exist_ok=True)
@@ -149,6 +167,11 @@ def write_bundled_ini(port: int, base_dir: Optional[str] = None) -> str:
         "http_server_username=\n"
         "http_server_password=\n"
         f"db_path={os.path.join(d, f'Everything-{INSTANCE_NAME}.db')}\n"
+        "run_as_admin=0\n"
+        "run_in_background=1\n"
+        "show_tray_icon=0\n"
+        "auto_include_fixed_volumes=1\n"
+        "check_for_updates_on_startup=0\n"
     )
     with open(ini, "w", encoding="utf-8") as f:
         f.write(content)
@@ -157,10 +180,16 @@ def write_bundled_ini(port: int, base_dir: Optional[str] = None) -> str:
 
 def launch_bundled(port: int, exe_path: Optional[str] = None,
                    base_dir: Optional[str] = None) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
-    """启动内置 Everything 便携版（独立实例）。
+    """启动内置 Everything 便携版（独立实例，后台无界面）。
 
-    返回 (Popen 或 None, 错误信息或 None)。使用 STARTUPINFO 以最小化方式启动
-    （避免主窗口弹出干扰用户），不再依赖 Everything 未必支持的 -minimized 命令行参数。
+    返回 (Popen 或 None, 错误信息或 None)。
+
+    以 `-startup` 方式启动：Everything 在后台运行、不显示任何搜索窗口
+    （voidtools 官方选项：“Run Everything in the background without showing any
+    search windows”）。配合 ini 的 show_tray_icon=0，做到完全无界面；HTTP 服务
+    由 ini 的 http_server=1 启用，与窗口模式无关。进程仍保有消息循环，HTTP 服务
+    线程照常初始化（此前用 STARTUPINFO 最小化窗口也能起 HTTP，可证明窗口消息循环
+    并非 HTTP 的前提；-startup 只是不再显示那个窗口而已）。
     """
     global _launched
     exe = exe_path or bundled_everything_exe()
@@ -168,17 +197,9 @@ def launch_bundled(port: int, exe_path: Optional[str] = None,
         return None, "未找到内置 everything.exe"
     ini = write_bundled_ini(port, base_dir)
     try:
-        flags = 0
-        startupinfo = None
-        if os.name == "nt":
-            # 以最小化方式启动 GUI：窗口消息循环是内置 HTTP 服务线程初始化的前提，
-            # 最小化不影响其运行，同时不干扰用户。SW_MINIMIZE=6 为 Windows 常量。
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags = subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 6  # SW_MINIMIZE
         proc = subprocess.Popen(
-            [exe, "-instance", INSTANCE_NAME, "-config", ini],
-            creationflags=flags, close_fds=True, startupinfo=startupinfo,
+            [exe, "-instance", INSTANCE_NAME, "-config", ini, "-startup"],
+            creationflags=0, close_fds=True,
         )
         with _launch_lock:
             _launched = True
@@ -237,6 +258,15 @@ def ensure_everything_running(
             "本地检索不可用：未检测到正在运行的 Everything HTTP 服务，"
             "且程序目录中也没有内置 Everything。"
         ), False
+
+    # 确保 Everything 服务已安装：有了服务，标准用户客户端即可经服务索引 NTFS，
+    # 不再弹“需要管理员权限索引 NTFS”对话框，也不触发 UAC。安装器已在提权环境
+    # 装好；若缺失（便携/免安装运行），这里尝试补装一次（标准用户会触发一次性
+    # UAC，装好后即永久生效；同一进程内最多尝试一次）。
+    global _service_install_attempted
+    if os.name == "nt" and not _service_install_attempted and not service_installed():
+        _service_install_attempted = True
+        install_service(exe)
 
     # 同一进程内已启动过 → 只等待，不再重复拉起
     with _launch_lock:
@@ -298,6 +328,76 @@ def quit_our_instance(exe_path: Optional[str] = None) -> None:
     try:
         subprocess.run(
             [exe, "-instance", INSTANCE_NAME, "-quit"], timeout=10,
+            creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def service_installed() -> bool:
+    """检测 Windows 是否已安装 Everything 服务（只读，无需管理员）。
+
+    用 `sc query Everything` 探测服务是否存在：returncode==0 表示服务已安装
+    （无论是否正在运行），非 0（如 1060 不存在）表示未安装。sc 不可用或查询
+    异常时返回 False（此时由调用方决定是否补装；安装本身是幂等的）。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        out = subprocess.run(
+            ["sc", "query", "Everything"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return out.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def install_service(exe_path: Optional[str] = None,
+                    wait_seconds: int = 20) -> Tuple[bool, Optional[str]]:
+    """安装并启动 Everything Windows 服务（需要管理员权限）。
+
+    装了服务后，标准用户的 everything.exe 客户端即可经服务读取 NTFS MFT/USN，
+    不再弹“需要管理员权限索引 NTFS”对话框，也不触发 UAC。服务以 SYSTEM 后台
+    运行、无界面。
+
+    - 安装器（已提权）调用：直接安装，无额外提示。
+    - 应用运行时（标准用户）调用：everything.exe 会自动以管理员身份重启一次
+      （一次性 UAC），完成后即永久生效。
+
+    服务会把启动路径记录下来，因此必须从**持久化副本**（%LOCALAPPDATA% 稳定目录）
+    执行安装——不能从 PyInstaller onefile 的 sys._MEIPASS 临时目录（退出即被清理）。
+
+    返回 (是否成功, 错误信息或 None)。
+    """
+    exe = exe_path or bundled_everything_exe()
+    if not exe:
+        return False, "未找到内置 everything.exe"
+    run_exe = _ensure_stable_exe(exe)  # 服务需指向持久化路径
+    try:
+        subprocess.run(
+            [run_exe, "-install-service"],
+            timeout=wait_seconds,
+            creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+        )
+        return True, None
+    except Exception as e:  # noqa: BLE001
+        return False, f"安装 Everything 服务失败：{e}"
+
+
+def uninstall_service(exe_path: Optional[str] = None) -> None:
+    """卸载 Everything 服务（best-effort，供卸载清理调用；需要管理员权限）。
+
+    `-uninstall-service` 按服务名经 SCM 移除服务，与用哪个 everything.exe 副本
+    执行无关，因此即便稳定目录已被清理，用随包内置副本执行也能卸载。
+    """
+    exe = exe_path or bundled_everything_exe()
+    if not exe:
+        return
+    try:
+        subprocess.run(
+            [exe, "-uninstall-service"], timeout=20,
             creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
         )
     except Exception:  # noqa: BLE001

@@ -15,7 +15,7 @@
 ; ============================================================================
 
 #define MyAppName "SuperSearch"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "Jiahui Zou"
 #define MyAppExeName "SuperSearch.exe"
 #define MyAppIco "assets\SuperSearch.ico"
@@ -42,9 +42,10 @@ WizardStyle=modern
 ; PySide6 仅提供 64 位轮子，安装 64 位
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; 非管理员也可安装（Everything 以当前用户进程运行，数据写在 %LOCALAPPDATA%）
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+; 需要管理员权限：安装一次 Everything 服务，让标准用户的客户端经服务索引 NTFS，
+; 从此不再弹“需要管理员权限索引 NTFS”对话框、也不触发 UAC。应用数据仍写在
+; %LOCALAPPDATA%（每用户），服务仅用于后台 NTFS 索引（headless，无界面）。
+PrivilegesRequired=admin
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -62,6 +63,11 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"
 
 [Run]
+; 先安装 Everything 服务（安装器已提权，静默完成、headless 无窗口）：让标准用户
+; 客户端经服务索引 NTFS，从此不再弹“需要管理员权限”对话框、也不触发 UAC。
+; 必须在启动应用前完成，客户端才能用上服务。
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--install-everything-service"; \
+    Flags: runhidden waituntilterminated; RunOnceId: "InstallEverythingService"
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
     Flags: nowait postinstall skipifsilent
 
@@ -74,3 +80,6 @@ Type: filesandordirs; Name: "{localappdata}\SuperSearch"
 ; 退出内置 Everything 独立实例（若仍在运行）；失败不影响卸载流程
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--quit-everything"; \
     RunOnceId: "QuitBundledEverything"; Flags: runhidden skipifdoesntexist
+; 卸载 Everything 服务（卸载器已提权；-uninstall-service 按服务名经 SCM 移除）
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--uninstall-everything-service"; \
+    RunOnceId: "UninstallEverythingService"; Flags: runhidden skipifdoesntexist
