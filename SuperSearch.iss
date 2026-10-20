@@ -2,11 +2,12 @@
 ; SuperSearch — Inno Setup 安装脚本
 ; ----------------------------------------------------------------------------
 ; 用途：把 PyInstaller 产出的单文件 exe 打包成"可直接安装"的 setup.exe。
+;       内置 Everything 便携版已嵌入 SuperSearch.exe（PyInstaller data 文件），
+;       因此安装包只需复制这一个 exe 即可"开箱即用"，无需用户单独安装 Everything。
 ;
 ; 步骤：
 ;   1) 先构建单文件 exe（已在项目 venv 中安装 PyInstaller 6.x）：
-;        venv/Scripts/python.exe -m PyInstaller --noconfirm --clean ^
-;          --onefile --windowed --name SuperSearch --distpath dist --workpath build main.py
+;        venv\Scripts\python.exe -m PyInstaller build\SuperSearch.spec
 ;      → 得到 dist\SuperSearch.exe
 ;   2) 安装 Inno Setup 6（https://jrsoftware.org/isinfo.php），然后编译本脚本：
 ;        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" SuperSearch.iss
@@ -14,9 +15,10 @@
 ; ============================================================================
 
 #define MyAppName "SuperSearch"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Jiahui Zou"
 #define MyAppExeName "SuperSearch.exe"
+#define MyAppIco "assets\SuperSearch.ico"
 
 [Setup]
 ; 生成一个稳定 GUID（同一应用请保持不变，便于升级安装）
@@ -25,8 +27,12 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 VersionInfoVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+; 安装包图标（出现在 setup.exe 与任务栏）
+SetupIconFile={#MyAppIco}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
+; 允许用户自定义安装路径（向导中显示"选择目标位置"页）
+DisableDirPage=no
 DisableProgramGroupPage=yes
 OutputDir=dist
 OutputBaseFilename=SuperSearch-Setup
@@ -36,21 +42,35 @@ WizardStyle=modern
 ; PySide6 仅提供 64 位轮子，安装 64 位
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; 非管理员也可安装（Everything 以当前用户进程运行，数据写在 %LOCALAPPDATA%）
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-; 单文件 exe 自包含，安装时只需复制这一个文件
+; 单文件 exe 自包含（已内嵌 Everything），安装时只需复制这一个文件
 [Files]
 Source: "dist\SuperSearch.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
+; 桌面快捷方式默认勾选（任务默认即为选中；用户可在安装向导中取消）
+Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
     Flags: nowait postinstall skipifsilent
+
+; 卸载时清理：内置 Everything 的运行数据（位于 %LOCALAPPDATA%\SuperSearch）、
+; 以及尝试退出仍可能在运行的内置 Everything 实例（best-effort）。
+[UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\SuperSearch"
+
+[UninstallRun]
+; 退出内置 Everything 独立实例（若仍在运行）；失败不影响卸载流程
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--quit-everything"; \
+    RunOnceId: "QuitBundledEverything"; Flags: runhidden skipifdoesntexist

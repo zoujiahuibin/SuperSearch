@@ -14,7 +14,8 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import config as cfg_mod
-from core.config import Settings, load_settings, save_settings
+from core import ev_bundler
+from core.config import Settings, load_settings, save_settings, EverythingConfig
 from core import format_sort
 from core.models import SearchResult
 from search import local_search, ima_search
@@ -697,7 +698,7 @@ class TestImaSearch(unittest.TestCase):
 
     def test_ima_client_doc_url(self):
         # 文档深链必须复用 open?url= 桥并显式带 action=autoOpenMedia，
-        # 否则客户端“知识库页”只会定位到库而不会打开该篇文档。
+        # 否则客户端"知识库页"只会定位到库而不会打开该篇文档。
         d = ima_search.ima_client_doc_url("7451978007345957", "pdf_abc_123")
         self.assertEqual(
             d,
@@ -705,6 +706,119 @@ class TestImaSearch(unittest.TestCase):
             "nkohmbngmopdajidckglcoehlaeepeoi/index.html"
             "?action=autoOpenMedia&knowledgeBaseId=7451978007345957"
             "&mediaId=pdf_abc_123")
+
+
+class TestEvBundler(unittest.TestCase):
+    def test_pick_bundled_port_order_and_fallback(self):
+        # 全部空闲 -> 优先 preferred
+        with mock.patch.object(ev_bundler, "_port_free", return_value=True):
+            self.assertEqual(ev_bundler.pick_bundled_port(80), 80)
+        # preferred 被占，回退到 BUNDLED_PORTS[0]=8180
+        def free_only_8180(p, host="127.0.0.1"):
+            return p == 8180
+        with mock.patch.object(ev_bundler, "_port_free", side_effect=free_only_8180):
+            self.assertEqual(ev_bundler.pick_bundled_port(80), 8180)
+        # 全部被占 -> None
+        with mock.patch.object(ev_bundler, "_port_free", return_value=False):
+            self.assertIsNone(ev_bundler.pick_bundled_port(80))
+
+    def test_write_bundled_ini(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        ini = ev_bundler.write_bundled_ini(8180, base_dir=d)
+        self.assertTrue(os.path.isfile(ini))
+        content = open(ini, encoding="utf-8").read()
+        self.assertIn("instance=SuperSearch", content)
+        self.assertIn("http_server=1", content)
+        self.assertIn("http_server_port=8180", content)
+        self.assertIn("db_path=", content)
+
+    def test_bundled_everything_exe_dev_path(self):
+        # 开发环境：回退到仓库 vendor/Everything/everything.exe
+        orig_isfile = os.path.isfile
+
+        def fake_isfile(p):
+            if p.replace("\\", "/").endswith("vendor/Everything/everything.exe"):
+                return True
+            return orig_isfile(p)
+
+        with mock.patch.object(sys, "frozen", False, create=True), \
+                mock.patch.object(os.path, "isfile", side_effect=fake_isfile):
+            found = ev_bundler.bundled_everything_exe()
+        self.assertIsNotNone(found)
+        self.assertTrue(found.replace("\\", "/").endswith("vendor/Everything/everything.exe"))
+
+    def test_bundled_everything_exe_frozen_meipass(self):
+        # 打包形态：优先用 sys._MEIPASS/Everything/everything.exe
+        mp = "C:\\_MEI12345"
+        expected = os.path.join(mp, "Everything", "everything.exe")
+
+        def fake_isfile(p):
+            return p == expected
+
+        with mock.patch.object(sys, "frozen", True, create=True), \
+                mock.patch.object(sys, "_MEIPASS", mp, create=True), \
+                mock.patch.object(os.path, "isfile", side_effect=fake_isfile):
+            found = ev_bundler.bundled_everything_exe()
+        self.assertEqual(found, expected)
+
+    def test_ensure_everything_running_reachable(self):
+        # 已可达 -> 不改端口、可直接本地检索
+        cfg = cfg_mod.EverythingConfig(port=80)
+        with mock.patch.object(ev_bundler, "_reachable", return_value=True):
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(cfg, wait_seconds=0)
+        self.assertIsNone(note)
+        self.assertTrue(ok)
+        self.assertEqual(new_cfg.port, 80)
+
+    def test_ensure_everything_running_no_bundled(self):
+        # 不可达且找不到内置 exe -> 返回错误、本地检索不可用
+        cfg = cfg_mod.EverythingConfig(port=80)
+        with mock.patch.object(ev_bundler, "_reachable", return_value=False), \
+                mock.patch.object(ev_bundler, "bundled_everything_exe", return_value=None):
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(cfg, wait_seconds=0)
+        self.assertFalse(ok)
+        self.assertIsNotNone(note)
+        self.assertIn("本地检索不可用", note)
+
+
+class TestTray(unittest.TestCase):
+    """系统托盘相关逻辑（不依赖显示器，纯导入/路径/绑定校验）。"""
+
+    def test_app_icon_path_dev(self):
+        # 开发环境下应解析到仓库 assets/SuperSearch.ico，且该文件存在
+        from ui import main_window
+        p = main_window._app_icon_path()
+        self.assertTrue(os.path.isfile(p), f"托盘/窗口图标不存在: {p}")
+
+    def test_tray_methods_bound(self):
+        # 托盘相关方法应通过 setattr 绑定到 MainWindow
+        from ui import main_window
+        for m in ("_setup_tray", "on_tray_activated", "show_normal",
+                  "quit_app", "closeEvent"):
+            self.assertTrue(
+                hasattr(main_window.MainWindow, m),
+                f"MainWindow 缺少托盘方法: {m}",
+            )
+
+    def test_close_event_minimizes_to_tray_when_available(self):
+        # 仅在具备真实托盘环境时执行（offscreen 下跳过）
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QCloseEvent
+        from ui import main_window
+
+        app = QApplication.instance() or QApplication([])
+        if not main_window.QSystemTrayIcon.isSystemTrayAvailable():
+            self.skipTest("no system tray in this environment")
+        win = main_window.MainWindow()
+        win._tray_available = True
+        win._force_quit = False
+        evt = QCloseEvent()
+        win.closeEvent(evt)
+        self.assertTrue(win.isHidden(), "有关闭事件时应最小化到托盘而非退出")
+        self.assertFalse(evt.isAccepted(), "最小化到托盘时 closeEvent 应 ignore")
 
 
 if __name__ == "__main__":

@@ -9,11 +9,12 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime
 from typing import List, Optional
 
 from PySide6.QtCore import QThread, Signal, QFileInfo, QSize, Qt, QDir
-from PySide6.QtGui import QDesktopServices, QColor, QAction
+from PySide6.QtGui import QDesktopServices, QColor, QAction, QIcon, QPixmap
 from PySide6.QtCore import QUrl, QUrlQuery
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,6 +43,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QSystemTrayIcon,
 )
 
 from core.config import (
@@ -56,6 +58,7 @@ from core.config import (
     save_settings,
 )
 from core import format_sort
+from core import ev_bundler
 from core.models import SearchResult
 from search import local_search, ima_search
 
@@ -112,6 +115,18 @@ def _fmt_dt(dt) -> str:
     return str(dt)
 
 
+def _app_icon_path() -> Optional[str]:
+    """定位应用图标（.ico）：打包后从 PyInstaller 解压目录(_MEIPASS)取，开发环境从仓库 assets 取。"""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        p = os.path.join(meipass, "SuperSearch.ico")
+        if os.path.isfile(p):
+            return p
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = os.path.join(repo, "assets", "SuperSearch.ico")
+    return p if os.path.isfile(p) else None
+
+
 class SearchWorker(QThread):
     result_ready = Signal(list)   # List[SearchResult]
     error_ready = Signal(str)     # 错误信息
@@ -148,11 +163,20 @@ class SearchWorker(QThread):
         if has_local:
             self.progress.emit("正在检索本地文件（Everything）…")
             self.progress_pct.emit(0)
-            try:
-                results.extend(local_search.search_local(
-                    self.query, self.ev_cfg, drives=self.local_drives))
-            except Exception as e:  # noqa: BLE001
-                self.error_ready.emit(f"本地检索失败：{e}")
+            # 确保 Everything HTTP 可用；不可达时自动启动内置便携版（等待就绪，最多 30s）
+            self.progress.emit("正在检查本地检索服务（Everything）…")
+            ev_cfg, ev_note, ev_ok = ev_bundler.ensure_everything_running(
+                self.ev_cfg, wait_seconds=30)
+            if ev_note:
+                self.progress.emit(ev_note)
+            if ev_ok:
+                try:
+                    results.extend(local_search.search_local(
+                        self.query, ev_cfg, drives=self.local_drives))
+                except Exception as e:  # noqa: BLE001
+                    self.error_ready.emit(f"本地检索失败：{e}")
+            else:
+                self.error_ready.emit(ev_note or "本地检索不可用")
             if has_ima:
                 self.progress_pct.emit(20)
             else:
@@ -205,7 +229,17 @@ class MainWindow(QMainWindow):
         self._ima_client_cache = None  # ima 电脑端是否可用（None=未探测）
         self._ext_icon_cache: dict = {}  # 扩展名 -> 系统图标缓存（ima 结果按类型显示）
         self._init_ui()
+        # 提前拉起本地检索服务：应用启动即启动内置 Everything 便携版（其配置已启用
+        # HTTP 服务），不阻塞界面；真正的 HTTP 就绪等待放到首次检索时再处理。
+        # retry_on_fail=False：启动阶段只负责拉起，不在此触发 8180 端口重启。
+        self.ev_cfg, _ev_note, _ev_ok = ev_bundler.ensure_everything_running(
+            self.ev_cfg, wait_seconds=0.5, retry_on_fail=False)
+        if _ev_note:
+            self.status.showMessage(_ev_note)
         self._check_backends()
+        # 系统托盘：关闭窗口时最小化到托盘而非退出；托盘菜单可「显示主窗口 / 退出」
+        self._force_quit = False
+        self._setup_tray()
 
     def _icon_for(self, r: SearchResult):
         """返回与 Everything 一致的系统图标。
@@ -251,7 +285,7 @@ class MainWindow(QMainWindow):
         return ic
 
     def _init_ui(self):
-        self.setWindowTitle("统一检索：本地文件 + ima 知识库")
+        self.setWindowTitle("SuperSearch")
         self.resize(1100, 720)
 
         # 菜单栏：设置
@@ -386,10 +420,15 @@ class MainWindow(QMainWindow):
         msgs = []
         if self.chk_local.isChecked():
             if not local_search.is_everything_reachable(self.ev_cfg):
-                msgs.append(
-                    f"Everything HTTP Server 不可达（{self.ev_cfg.base_url}），"
-                    "请在 Everything -> 选项 -> HTTP 服务器 中启用"
-                )
+                if ev_bundler.bundled_everything_exe():
+                    # 已自动启动内置 Everything 便携版（正在建立索引），
+                    # 首次检索时会自动等待其就绪，不必打扰用户
+                    self.status.showMessage("内置 Everything 正在启动（首次需建立索引）…")
+                else:
+                    msgs.append(
+                        f"Everything HTTP Server 不可达（{self.ev_cfg.base_url}），"
+                        "请在 Everything -> 选项 -> HTTP 服务器 中启用"
+                    )
         if self.chk_ima.isChecked() and not self.ima_cfg.has_credentials:
             msgs.append("未配置 ima 凭证（client_id / api_key）")
         if msgs:
@@ -768,11 +807,121 @@ class MainWindow(QMainWindow):
             self.status.showMessage(f"未取到直链（{err or '无 url'}），已打开 ima 网页")
 
 
+    def closeEvent(self, event):
+        # 关闭窗口 -> 最小化到托盘（不真正退出）；仅当用户从托盘菜单「退出」时才真正退出。
+        # 必须在 MainWindow 类体内定义，PySide6 才能将其注册为 Qt 虚函数覆盖（setattr 无效）。
+        if self._tray_available and self.tray.isVisible() and not self._force_quit:
+            self.hide()
+            event.ignore()
+            self.status.showMessage("SuperSearch 已最小化到系统托盘，右键托盘图标可退出")
+        else:
+            event.accept()
+
+
+def _quit_bundled_everything() -> int:
+    """退出内置 Everything 独立实例（供卸载清理调用，避免残留进程/锁文件）。
+
+    优先用稳定目录里正在运行的副本；失败再回退到随包内置的 everything.exe。
+    返回 0 表示已尝试退出（无论目标是否原本就在运行），非 0 表示找不到 exe。
+    """
+    import subprocess
+    candidates = []
+    stable = ev_bundler._stable_exe_path()
+    if os.path.isfile(stable):
+        candidates.append(stable)
+    bundled = ev_bundler.bundled_everything_exe()
+    if bundled:
+        candidates.append(bundled)
+    for exe in candidates:
+        try:
+            # -instance 限定只退出 SuperSearch 实例；-quit 触发退出
+            subprocess.run(
+                [exe, "-instance", ev_bundler.INSTANCE_NAME, "-quit"],
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return 0
+        except Exception:  # noqa: BLE001
+            continue
+    return 1
+
+
 def main():
+    import sys
+    # 卸载清理钩子：仅退出内置 Everything 实例并立即退出，不启动 GUI
+    if "--quit-everything" in sys.argv:
+        sys.exit(_quit_bundled_everything())
+
     app = QApplication([])
+    # 统一设置应用图标（窗口标题栏 / 任务栏 / 托盘共用），从 .ico 加载
+    icon_path = _app_icon_path()
+    if icon_path:
+        app.setWindowIcon(QIcon(icon_path))
     win = MainWindow()
     win.show()
     app.exec()
+
+
+def _setup_tray(self):
+    """初始化系统托盘图标（Windows 通知区域）。
+
+    不依赖 QSystemTrayIcon.isSystemTrayAvailable()（部分环境会误报 False 导致托盘
+    整体不创建）；直接创建并 show()。若系统确实无托盘，show() 为 no-op，关闭时由
+    closeEvent 优雅退出。图标缺失时用纯色方块兜底，确保托盘图标永不可见缺失。
+    """
+    self._tray_available = True
+    self.tray = QSystemTrayIcon(self)
+    icon = QApplication.windowIcon()
+    if icon.isNull():
+        icon = QIcon(_app_icon_path() or "")
+    if icon.isNull():
+        pm = QPixmap(32, 32)
+        pm.fill(QColor(45, 108, 223))
+        icon = QIcon(pm)
+    self.tray.setIcon(icon)
+    self.tray.setToolTip("SuperSearch")
+    menu = QMenu(self)
+    act_show = menu.addAction("显示主窗口")
+    act_show.triggered.connect(self.show_normal)
+    menu.addSeparator()
+    act_quit = menu.addAction("退出 SuperSearch")
+    act_quit.triggered.connect(self.quit_app)
+    self.tray.setContextMenu(menu)
+    self.tray.activated.connect(self.on_tray_activated)
+    self.tray.show()
+
+
+def on_tray_activated(self, reason):
+    # 双击 / 单击托盘图标：切换主窗口显隐
+    if reason in (QSystemTrayIcon.DoubleClick, QSystemTrayIcon.Trigger):
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.show_normal()
+
+
+def show_normal(self):
+    self.show()
+    self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+    self.raise_()
+    self.activateWindow()
+    if self._tray_available:
+        self.tray.show()
+
+
+def quit_app(self):
+    # 真正退出：先收起托盘图标，再结束事件循环
+    self._force_quit = True
+    if self._tray_available:
+        self.tray.hide()
+    QApplication.quit()
+
+
+# 将托盘方法绑定到 MainWindow（保持 MainWindow 类体整洁）
+# 注：closeEvent 必须在 MainWindow 类体内定义（见上方），PySide6 才能将其注册为
+#     Qt 虚函数覆盖；其余方法经信号连接，setattr 绑定即可正常工作。
+for _m in ("_setup_tray", "on_tray_activated", "show_normal", "quit_app"):
+    setattr(MainWindow, _m, globals()[_m])
 
 
 class SettingsDialog(QDialog):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -149,7 +150,15 @@ class Settings:
 
 
 def settings_path() -> Path:
-    """设置文件存放在项目根目录（core 的上一级）。"""
+    """设置文件存放位置。
+
+    - 打包后（PyInstaller onefile）：temp 包目录不可写且易失，改存用户可写的
+      %APPDATA%\\SuperSearch\\settings.json，确保首选项跨运行持久化。
+    - 开发环境：仍放在仓库根目录，便于调试与纳入版本控制（已被 .gitignore 忽略）。
+    """
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return Path(base) / "SuperSearch" / "settings.json"
     return Path(__file__).resolve().parent.parent / "settings.json"
 
 
