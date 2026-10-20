@@ -531,43 +531,66 @@ class MainWindow(QMainWindow):
             self._ima_client_cache = ok
         return self._ima_client_cache
 
-    def _open_url_prefer_client(self, web_url: str) -> bool:
-        """优先用 ima 电脑端打开给定网页地址；未装客户端则回退默认浏览器。
+    def _open_ima_link(self, deeplink: str, browser_url: str) -> bool:
+        """优先用 ima 电脑端深链打开；未装客户端则回退默认浏览器打开 browser_url。
 
-        返回 True 表示走了 ima 客户端。深链格式：imacopilot://open?url=<编码后的网址>。
+        返回 True 表示走了 ima 客户端。深链形如
+        imacopilot://knowledgeDetail?knowledgeBaseId=..&mediaId=..（精准定位）。
         """
         if self._ima_client_available():
-            QDesktopServices.openUrl(QUrl(ima_search.ima_client_deeplink(web_url)))
+            self._open_ima_deeplink(deeplink)
             return True
-        QDesktopServices.openUrl(QUrl(web_url))
+        QDesktopServices.openUrl(QUrl(browser_url))
         return False
 
-    def _open_ima_kb(self, r: SearchResult):
-        """ima 打开路径：解析数字 knowledgeBaseId，优先用 ima 电脑端打开该知识库。
+    @staticmethod
+    def _open_ima_deeplink(deeplink: str):
+        """调起 ima 客户端打开深链。
 
-        网页地址需要数字型 knowledgeBaseId，OpenAPI 只给 base64 kb_id（无法换算），
-        故用 get_knowledge_list 根目录的 current_path[0].folder_id 解析，并按 kb_id 缓存。
+        用 os.startfile 走 ShellExecute，保留 imacopilot://knowledgeDetail 的原始大小写
+        （QUrl 会把 host 归一为小写 knowledgedetail，可能影响客户端匹配）。
+        """
+        if os.name == "nt":
+            os.startfile(deeplink)
+        else:
+            QDesktopServices.openUrl(QUrl(deeplink))
+
+    def _open_ima_kb(self, r: SearchResult):
+        """ima 打开路径：解析数字 knowledgeBaseId，优先用 ima 电脑端精准打开该知识库。
+
+        网页/客户端深链都需要数字型 knowledgeBaseId，OpenAPI 只给 base64 kb_id
+        （无法换算），故用 get_knowledge_list 根目录的 current_path[0].folder_id
+        解析，并按 kb_id 缓存。
         """
         numeric = self._kb_numeric_cache.get(r.kb_id) if r.kb_id else None
         if numeric is None and r.kb_id and self.ima_cfg.has_credentials:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            try:
-                numeric = ima_search.get_kb_numeric_id(self.ima_cfg, r.kb_id)
-            except Exception:  # noqa: BLE001
-                numeric = None
-            finally:
-                QApplication.restoreOverrideCursor()
-            if numeric:
-                self._kb_numeric_cache[r.kb_id] = numeric
+            numeric = self._resolve_kb_numeric(r.kb_id)
         if numeric:
+            deeplink = ima_search.ima_client_kb_url(numeric)
             web = f"https://ima.qq.com/wikis?knowledgeBaseId={numeric}"
-            used = self._open_url_prefer_client(web)
+            used = self._open_ima_link(deeplink, web)
             self.status.showMessage(
                 ("已在 ima 客户端打开知识库：" if used else "已打开知识库网页：")
                 + (r.kb_name or numeric))
         else:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
             self.status.showMessage("未能获取知识库数字 ID，已打开 ima 网页")
+
+    def _resolve_kb_numeric(self, kb_id: str):
+        """解析并缓存 kb_id(base64) -> 数字 knowledgeBaseId；失败返回 None。"""
+        numeric = self._kb_numeric_cache.get(kb_id)
+        if numeric:
+            return numeric
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            numeric = ima_search.get_kb_numeric_id(self.ima_cfg, kb_id)
+        except Exception:  # noqa: BLE001
+            numeric = None
+        finally:
+            QApplication.restoreOverrideCursor()
+        if numeric:
+            self._kb_numeric_cache[kb_id] = numeric
+        return numeric
 
     def _on_table_context_menu(self, pos):
         """结果表格右键菜单：【打开】/【打开路径】。"""
@@ -588,16 +611,26 @@ class MainWindow(QMainWindow):
             self._open_result_path(r)
 
     def _open_ima(self, r: SearchResult):
-        """双击/【打开】ima 结果：取其真实直链，优先用 ima 电脑端打开该文档。
+        """双击/【打开】ima 结果：优先用 ima 电脑端精准打开该篇文档。
 
-        通过 get_media_info(media_id) 拿 data.url_info.url（COS 预签名直链），
-        再用 imacopilot://open?url=<直链> 调起电脑端打开；未装客户端则用默认浏览器
-        （PDF/图片浏览器直接预览，Office 等下载到本地）。失败则回退 ima 网页。
+        深链：imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>&mediaId=<媒体ID>
+        （数字 ID 由 get_kb_numeric_id 解析）。未装电脑端则回退：用 get_media_info 的
+        COS 直链在默认浏览器打开（PDF/图片预览，Office 下载）。失败回退 ima 网页。
         """
         if not self.ima_cfg.has_credentials or not r.ref_id:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
             self.status.showMessage("未配置 ima 凭证或无文档 ID，已打开 ima 网页")
             return
+
+        # 装了电脑端：用 knowledgeDetail 深链精准定位到该篇
+        if self._ima_client_available() and r.kb_id:
+            numeric = self._resolve_kb_numeric(r.kb_id)
+            if numeric:
+                self._open_ima_deeplink(ima_search.ima_client_doc_url(numeric, r.ref_id))
+                self.status.showMessage(f"已在 ima 客户端打开文档：{r.title}")
+                return
+
+        # 回退：取 COS 直链用默认浏览器打开
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         url = None
         err = ""
@@ -610,9 +643,8 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         if url:
-            used = self._open_url_prefer_client(url)
-            self.status.showMessage(
-                "已在 ima 客户端打开文档" if used else "已在默认浏览器打开 ima 文档")
+            QDesktopServices.openUrl(QUrl(url))
+            self.status.showMessage("已在默认浏览器打开 ima 文档")
         else:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
             self.status.showMessage(f"未取到直链（{err or '无 url'}），已打开 ima 网页")

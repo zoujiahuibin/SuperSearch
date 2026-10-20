@@ -457,13 +457,16 @@ class TestImaSearch(unittest.TestCase):
             nid = ima_search.get_kb_numeric_id(self._cfg(), "b64kb")
         self.assertIsNone(nid)
 
-    def test_ima_client_deeplink(self):
-        # imacopilot://open?url=<URL编码的网页地址>
-        target = "https://ima.qq.com/wikis?knowledgeBaseId=7451978007345957"
-        d = ima_search.ima_client_deeplink(target)
-        self.assertTrue(d.startswith("imacopilot://open?url="))
-        from urllib.parse import unquote
-        self.assertEqual(unquote(d.split("url=", 1)[1]), target)
+    def test_ima_client_kb_url(self):
+        d = ima_search.ima_client_kb_url("7451978007345957")
+        self.assertEqual(
+            d, "imacopilot://knowledgeDetail?knowledgeBaseId=7451978007345957")
+
+    def test_ima_client_doc_url(self):
+        d = ima_search.ima_client_doc_url("7451978007345957", "pdf_abc_123")
+        self.assertEqual(
+            d,
+            "imacopilot://knowledgeDetail?knowledgeBaseId=7451978007345957&mediaId=pdf_abc_123")
 
 
 if __name__ == "__main__":
