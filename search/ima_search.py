@@ -144,24 +144,39 @@ def get_kb_numeric_id(cfg: ImaConfig, kb_id: str) -> Optional[str]:
     return None
 
 
+# 客户端内置前端的"知识库页"扩展 ID（REA 其前端常量 Yt.KnowledgeBase / ua.KnowledgeBase 得到）。
+# 客户端自己的 web→电脑端 桥 TQ 用它构造：
+#   imacopilot://open?url=<chrome-extension://<ext>/index.html?knowledgeBaseId=数字ID>
+_IMA_KB_EXT_ID = "nkohmbngmopdajidckglcoehlaeepeoi"
+
+
 def ima_client_kb_url(numeric_kb_id: str) -> str:
     """ima 电脑端「打开知识库」深链（精准定位到该库）。
 
-    依据客户端内置前端：imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>。
-    knowledgeBaseId 需为网页端数字 ID（由 get_kb_numeric_id 解析）。
+    复刻客户端内置前端 TQ 桥：
+        imacopilot://open?url=chrome-extension://<KB扩展>/index.html?knowledgeBaseId=<数字ID>
+    numeric_kb_id 为数字型 knowledgeBaseId（由 get_kb_numeric_id 解析）。
+    REA 客户端本地缓存确认：客户端内部用数字 knowledgeBaseId（如 7451978007345957），
+    与网页 ima.qq.com/wikis?knowledgeBaseId=<数字> 一致，而非 OpenAPI 的 base64 kb_id。
     """
-    from urllib.parse import urlencode
-    return "imacopilot://knowledgeDetail?" + urlencode({"knowledgeBaseId": numeric_kb_id})
+    return (
+        f"imacopilot://open?url="
+        f"chrome-extension://{_IMA_KB_EXT_ID}/index.html?knowledgeBaseId={numeric_kb_id}"
+    )
 
 
 def ima_client_doc_url(numeric_kb_id: str, media_id: str) -> str:
     """ima 电脑端「打开知识库内某篇文档」深链（精准定位到该篇）。
 
-    imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>&mediaId=<媒体ID>。
+    复刻客户端内置前端 xQ 桥：
+        imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>&mediaId=<媒体ID>&launchChannel=10000154
+    numeric_kb_id 为数字型 knowledgeBaseId；media_id 为文档的 media_id（search 结果里的 ref_id）。
+    launchChannel 取自客户端默认常量 vQ="10000154"（其 xQ 永远带此参数）。
     """
     from urllib.parse import urlencode
     return "imacopilot://knowledgeDetail?" + urlencode(
-        {"knowledgeBaseId": numeric_kb_id, "mediaId": media_id})
+        {"knowledgeBaseId": numeric_kb_id, "mediaId": media_id,
+         "launchChannel": "10000154"})
 
 
 def list_knowledge_bases(cfg: ImaConfig, query: str = "") -> List[Dict[str, str]]:

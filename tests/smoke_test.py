@@ -460,13 +460,16 @@ class TestImaSearch(unittest.TestCase):
     def test_ima_client_kb_url(self):
         d = ima_search.ima_client_kb_url("7451978007345957")
         self.assertEqual(
-            d, "imacopilot://knowledgeDetail?knowledgeBaseId=7451978007345957")
+            d,
+            "imacopilot://open?url=chrome-extension://"
+            "nkohmbngmopdajidckglcoehlaeepeoi/index.html?knowledgeBaseId=7451978007345957")
 
     def test_ima_client_doc_url(self):
         d = ima_search.ima_client_doc_url("7451978007345957", "pdf_abc_123")
         self.assertEqual(
             d,
-            "imacopilot://knowledgeDetail?knowledgeBaseId=7451978007345957&mediaId=pdf_abc_123")
+            "imacopilot://knowledgeDetail?knowledgeBaseId=7451978007345957"
+            "&mediaId=pdf_abc_123&launchChannel=10000154")
 
 
 if __name__ == "__main__":

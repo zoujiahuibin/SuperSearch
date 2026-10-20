@@ -103,7 +103,7 @@ venv/Scripts/python.exe main.py
    - **打开**：与双击效果相同；
    - **打开路径**：本地结果打开其**所在文件夹**（即“路径”列所示的目录；文件夹结果则打开该文件夹本身）；ima 结果**优先用 ima 电脑端打开该知识库**（未装电脑端则打开网页 `https://ima.qq.com/wikis?knowledgeBaseId=<数字ID>`）——程序会自动经 `get_knowledge_list` 根目录解析出网页端数字 ID（OpenAPI 只给 base64 kb_id，无法直接用于网页），并按库缓存；解析失败则回退打开 ima 网页。
 
-> ima 电脑端深链：安装 ima.copilot 客户端后会注册 `imacopilot://` 协议，程序用 `imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>[&mediaId=<媒体ID>]` **精准定位**并调起客户端打开对应知识库/文档（经 `os.startfile` 保留大小写）；未安装时自动回退默认浏览器（对分发到其它机器也稳妥）。
+> ima 电脑端深链（经 REA 客户端逆向确认）：安装 ima.copilot 客户端后注册 `imacopilot://` 协议。**打开路径（知识库）**复刻客户端原生 `TQ` 桥：`imacopilot://open?url=chrome-extension://nkohmbngmopdajidckglcoehlaeepeoi/index.html?knowledgeBaseId=<数字ID>`；**打开（文档）**复刻客户端原生 `xQ` 桥：`imacopilot://knowledgeDetail?knowledgeBaseId=<数字ID>&mediaId=<媒体ID>&launchChannel=10000154`。其中数字 ID 由 `get_knowledge_list` 根目录 `folder_id` 解析（客户端本地缓存证实其内部用数字 knowledgeBaseId，而非 OpenAPI 的 base64 kb_id）。深链经 `os.startfile` 调起并保留大小写；未安装客户端时自动回退默认浏览器（对分发到其它机器也稳妥）。
 7. **查看详情**：单击任一行，底部显示路径 / 大小 / 时间，或 ima 高亮摘要。
 8. **设置**（菜单栏「设置」）：
    - **文件格式排序…**：自定义扩展名优先级，让结果按你设定的格式顺序排列。
