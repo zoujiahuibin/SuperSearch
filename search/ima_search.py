@@ -116,6 +116,34 @@ def get_media_url(cfg: ImaConfig, media_id: str) -> Optional[str]:
     return url or None
 
 
+def get_kb_numeric_id(cfg: ImaConfig, kb_id: str) -> Optional[str]:
+    """获取知识库在网页端使用的数字 knowledgeBaseId（雪花 ID）。
+
+    OpenAPI 只暴露 base64 形态的 kb_id，而网页地址
+    https://ima.qq.com/wikis?knowledgeBaseId=<数字ID> 需要数字型 ID，二者无法互相换算。
+    经实测：get_knowledge_list 根目录返回的 current_path[0].folder_id 即该数字 ID
+    （根目录的 folder_id == knowledge_base_id）；取不到时回退用根目录条目的
+    parent_folder_id。失败返回 None。
+    """
+    if not kb_id:
+        return None
+    try:
+        data = _post(
+            cfg, "get_knowledge_list",
+            {"knowledge_base_id": kb_id, "cursor": "", "limit": 1},
+        )
+    except ImaApiError:
+        return None
+    cp = data.get("current_path") or []
+    if cp and cp[0].get("folder_id"):
+        return cp[0]["folder_id"]
+    for it in data.get("knowledge_list", []):
+        pf = it.get("parent_folder_id")
+        if pf:
+            return pf
+    return None
+
+
 def list_knowledge_bases(cfg: ImaConfig, query: str = "") -> List[Dict[str, str]]:
     """列出（按名称匹配或为空时列出全部）知识库，返回 [{id, name}]。
 

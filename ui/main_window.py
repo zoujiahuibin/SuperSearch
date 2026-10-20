@@ -178,6 +178,7 @@ class MainWindow(QMainWindow):
         self.all_results: List[SearchResult] = []
         self._cols_initialized = False  # 列宽是否已完成首次按内容自适应
         self.icon_provider = QFileIconProvider()  # 系统 shell 图标（与资源管理器/Everything 同源）
+        self._kb_numeric_cache: dict = {}  # ima kb_id(base64) -> 数字 knowledgeBaseId 缓存
         self._init_ui()
         self._check_backends()
 
@@ -506,17 +507,35 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
         elif r.source == "ima":
-            # ima：打开该结果所属知识库地址 https://ima.qq.com/wikis?knowledgeBaseId=<kb_id>
-            if r.kb_id:
-                url = QUrl("https://ima.qq.com/wikis")
-                query = QUrlQuery()
-                query.addQueryItem("knowledgeBaseId", r.kb_id)  # 自动 URL 编码
-                url.setQuery(query)
-                QDesktopServices.openUrl(url)
-                self.status.showMessage(f"已打开知识库：{r.kb_name or r.kb_id}")
-            else:
-                QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
-                self.status.showMessage("未获取到知识库 ID，已打开 ima 网页")
+            self._open_ima_kb(r)
+
+    def _open_ima_kb(self, r: SearchResult):
+        """ima 打开路径：解析数字 knowledgeBaseId 并打开知识库网页。
+
+        网页地址需要数字型 knowledgeBaseId，OpenAPI 只给 base64 kb_id（无法换算），
+        故用 get_knowledge_list 根目录的 current_path[0].folder_id 解析，并按 kb_id 缓存。
+        """
+        numeric = self._kb_numeric_cache.get(r.kb_id) if r.kb_id else None
+        if numeric is None and r.kb_id and self.ima_cfg.has_credentials:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                numeric = ima_search.get_kb_numeric_id(self.ima_cfg, r.kb_id)
+            except Exception:  # noqa: BLE001
+                numeric = None
+            finally:
+                QApplication.restoreOverrideCursor()
+            if numeric:
+                self._kb_numeric_cache[r.kb_id] = numeric
+        if numeric:
+            url = QUrl("https://ima.qq.com/wikis")
+            query = QUrlQuery()
+            query.addQueryItem("knowledgeBaseId", numeric)
+            url.setQuery(query)
+            QDesktopServices.openUrl(url)
+            self.status.showMessage(f"已打开知识库：{r.kb_name or r.kb_id}")
+        else:
+            QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
+            self.status.showMessage("未能获取知识库数字 ID，已打开 ima 网页")
 
     def _on_table_context_menu(self, pos):
         """结果表格右键菜单：【打开】/【打开路径】。"""

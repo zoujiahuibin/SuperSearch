@@ -415,6 +415,48 @@ class TestImaSearch(unittest.TestCase):
         self.assertEqual(seen, [(1, 2), (2, 2)])
         self.assertEqual(errs, [])
 
+    def test_get_kb_numeric_id(self):
+        # 根目录 current_path[0].folder_id 即网页数字 knowledgeBaseId
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 0, "msg": "ok", "data": {
+                "current_path": [{"folder_id": "7451978007345957", "name": "论文集"}],
+                "knowledge_list": [], "is_end": True, "next_cursor": ""}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.get_kb_numeric_id(self._cfg(), "b64kb")
+        self.assertEqual(nid, "7451978007345957")
+
+    def test_get_kb_numeric_id_fallback_parent_folder(self):
+        # 无 current_path 时回退到根条目 parent_folder_id
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 0, "msg": "ok", "data": {
+                "knowledge_list": [{"media_id": "m", "parent_folder_id": "123"}],
+                "is_end": True, "next_cursor": ""}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.get_kb_numeric_id(self._cfg(), "b64kb")
+        self.assertEqual(nid, "123")
+
+    def test_get_kb_numeric_id_error_returns_none(self):
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 200001, "msg": "limited", "data": {}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.get_kb_numeric_id(self._cfg(), "b64kb")
+        self.assertIsNone(nid)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
