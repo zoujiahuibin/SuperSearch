@@ -144,6 +144,16 @@ def get_kb_numeric_id(cfg: ImaConfig, kb_id: str) -> Optional[str]:
     return None
 
 
+def ima_client_deeplink(web_url: str) -> str:
+    """把 ima 网页地址包装成电脑端深链，供 ima.copilot 客户端打开。
+
+    依据 ima 客户端内置前端的约定：imacopilot://open?url=<URL编码的网页地址>。
+    未安装客户端时该协议无处理程序，调用方应改走默认浏览器。
+    """
+    from urllib.parse import quote
+    return "imacopilot://open?url=" + quote(web_url, safe="")
+
+
 def list_knowledge_bases(cfg: ImaConfig, query: str = "") -> List[Dict[str, str]]:
     """列出（按名称匹配或为空时列出全部）知识库，返回 [{id, name}]。
 

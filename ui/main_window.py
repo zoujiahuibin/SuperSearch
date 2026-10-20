@@ -178,6 +178,7 @@ class MainWindow(QMainWindow):
         self._cols_initialized = False  # 列宽是否已完成首次按内容自适应
         self.icon_provider = QFileIconProvider()  # 系统 shell 图标（与资源管理器/Everything 同源）
         self._kb_numeric_cache: dict = {}  # ima kb_id(base64) -> 数字 knowledgeBaseId 缓存
+        self._ima_client_cache = None  # ima 电脑端是否可用（None=未探测）
         self._init_ui()
         self._check_backends()
 
@@ -510,8 +511,39 @@ class MainWindow(QMainWindow):
         elif r.source == "ima":
             self._open_ima_kb(r)
 
+    def _ima_client_available(self) -> bool:
+        """检测是否安装了 ima 电脑端（是否注册了 imacopilot / ima.copilot 协议）。"""
+        if os.name != "nt":
+            return False
+        if self._ima_client_cache is None:
+            ok = False
+            try:
+                import winreg
+                for scheme in ("imacopilot", "ima.copilot"):
+                    try:
+                        winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, scheme)
+                        ok = True
+                        break
+                    except OSError:
+                        continue
+            except Exception:  # noqa: BLE001
+                ok = False
+            self._ima_client_cache = ok
+        return self._ima_client_cache
+
+    def _open_url_prefer_client(self, web_url: str) -> bool:
+        """优先用 ima 电脑端打开给定网页地址；未装客户端则回退默认浏览器。
+
+        返回 True 表示走了 ima 客户端。深链格式：imacopilot://open?url=<编码后的网址>。
+        """
+        if self._ima_client_available():
+            QDesktopServices.openUrl(QUrl(ima_search.ima_client_deeplink(web_url)))
+            return True
+        QDesktopServices.openUrl(QUrl(web_url))
+        return False
+
     def _open_ima_kb(self, r: SearchResult):
-        """ima 打开路径：解析数字 knowledgeBaseId 并打开知识库网页。
+        """ima 打开路径：解析数字 knowledgeBaseId，优先用 ima 电脑端打开该知识库。
 
         网页地址需要数字型 knowledgeBaseId，OpenAPI 只给 base64 kb_id（无法换算），
         故用 get_knowledge_list 根目录的 current_path[0].folder_id 解析，并按 kb_id 缓存。
@@ -528,12 +560,11 @@ class MainWindow(QMainWindow):
             if numeric:
                 self._kb_numeric_cache[r.kb_id] = numeric
         if numeric:
-            url = QUrl("https://ima.qq.com/wikis")
-            query = QUrlQuery()
-            query.addQueryItem("knowledgeBaseId", numeric)
-            url.setQuery(query)
-            QDesktopServices.openUrl(url)
-            self.status.showMessage(f"已打开知识库：{r.kb_name or r.kb_id}")
+            web = f"https://ima.qq.com/wikis?knowledgeBaseId={numeric}"
+            used = self._open_url_prefer_client(web)
+            self.status.showMessage(
+                ("已在 ima 客户端打开知识库：" if used else "已打开知识库网页：")
+                + (r.kb_name or numeric))
         else:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
             self.status.showMessage("未能获取知识库数字 ID，已打开 ima 网页")
@@ -557,11 +588,11 @@ class MainWindow(QMainWindow):
             self._open_result_path(r)
 
     def _open_ima(self, r: SearchResult):
-        """双击 ima 结果：取其真实直链并用默认浏览器打开。
+        """双击/【打开】ima 结果：取其真实直链，优先用 ima 电脑端打开该文档。
 
-        通过 get_media_info(media_id) 拿 data.url_info.url（COS 预签名直链）：
-        PDF/图片会在浏览器直接预览，Office 等文件浏览器会下载到本地。
-        失败或无直链时回退为打开 ima 网页，供手动定位。
+        通过 get_media_info(media_id) 拿 data.url_info.url（COS 预签名直链），
+        再用 imacopilot://open?url=<直链> 调起电脑端打开；未装客户端则用默认浏览器
+        （PDF/图片浏览器直接预览，Office 等下载到本地）。失败则回退 ima 网页。
         """
         if not self.ima_cfg.has_credentials or not r.ref_id:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
@@ -579,8 +610,9 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         if url:
-            QDesktopServices.openUrl(QUrl(url))
-            self.status.showMessage("已在默认浏览器打开 ima 文档")
+            used = self._open_url_prefer_client(url)
+            self.status.showMessage(
+                "已在 ima 客户端打开文档" if used else "已在默认浏览器打开 ima 文档")
         else:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
             self.status.showMessage(f"未取到直链（{err or '无 url'}），已打开 ima 网页")
