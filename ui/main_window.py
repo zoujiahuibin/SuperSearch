@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from datetime import datetime
 from typing import List
 
@@ -491,19 +490,21 @@ class MainWindow(QMainWindow):
     def _open_result_path(self, r: SearchResult):
         """【打开路径】：本地打开所在文件夹（并选中文件）；ima 打开 ima 网页到对应知识库。"""
         if r.source == "local" and r.path:
-            folder = os.path.dirname(r.path)
+            # 打开所在文件夹：文件夹结果打开其本身；文件结果打开其父目录（即"路径"列的目录）。
+            # 用 os.startfile 直接打开该目录——比 `explorer /select,<path>` 稳定，
+            # 后者在部分环境会退回打开默认"文档"库。
+            target = (
+                r.path if (r.kind == "folder" and os.path.isdir(r.path))
+                else (os.path.dirname(r.path) or r.path)
+            )
             try:
-                if os.path.isdir(r.path):
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(r.path))
-                    return
-                if folder and os.path.isdir(folder):
-                    # Windows：资源管理器打开并选中该文件
+                if target and os.path.isdir(target):
                     if os.name == "nt":
-                        subprocess.Popen(["explorer", "/select," + r.path])
+                        os.startfile(target)
                     else:
-                        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
-                else:
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(folder or r.path))
+                        QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+                elif target:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(target))
             except Exception:  # noqa: BLE001
                 pass
         elif r.source == "ima":
