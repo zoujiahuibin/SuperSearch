@@ -65,9 +65,10 @@ Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "A
 [Run]
 ; 先安装 Everything 服务（安装器已提权，静默完成、headless 无窗口）：让标准用户
 ; 客户端经服务索引 NTFS，从此不再弹“需要管理员权限”对话框、也不触发 UAC。
-; 必须在启动应用前完成，客户端才能用上服务。
+; 必须在启动应用前完成，客户端才能用上服务。安装服务是幂等的，重装/升级再跑无害
+; （注意：RunOnceId 只能用于 [UninstallRun]，故此处不加）。
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--install-everything-service"; \
-    Flags: runhidden waituntilterminated; RunOnceId: "InstallEverythingService"
+    Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
     Flags: nowait postinstall skipifsilent
 
