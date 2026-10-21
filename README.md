@@ -3,6 +3,7 @@
 一个独立的桌面 GUI（PySide6），同时检索：
 
 - **本地文件**：通过 Everything HTTP Server。v1.2.0 起**内置 Everything 便携版**（随 exe 打包，首次运行自动拉起），无需单独安装 Everything。v1.2.1 起安装器会装好 **Everything 服务**，内置实例改为**后台无界面**运行——不再弹“需要管理员权限索引 NTFS”对话框，也不再显示 Everything 窗口/托盘图标。v1.2.2 修正了 HTTP 服务器的启用方式（ini 键名），并新增索引就绪等待与应用退出时的数据库保存。
+- **百度网盘文件**：经百度网盘开放平台检索（v1.3.0 新增）。在「设置 → 百度网盘授权…」完成一次设备码授权后即可检索账号网盘内的文件（文件名关键词，全盘）；双击结果会在浏览器打开网盘并定位到所在目录。
 - **ima 知识库文档/笔记**：通过 ima 官方 OpenAPI。
 
 结果合并在同一张列表里，用**来源标签**区分（蓝色=本地，绿色=ima），支持按来源筛选、双击打开本地文件、查看 ima 高亮摘要。
@@ -30,6 +31,7 @@
 | 依赖 | `PySide6>=6.5`、`requests>=2.28` | 见 `requirements.txt`，用 `pip install -r requirements.txt` 安装。 |
 | Everything | 1.4+（已内置） | 仅本地检索需要。v1.2.0 起程序已内置 Everything 便携版并自动拉起其 HTTP Server（默认 `127.0.0.1:80`，被占用则退 8180）；若本机已装并启用了 Everything HTTP 服务，则直接复用，不再重复拉起。v1.2.1 起安装器安装 Everything 服务（需管理员），内置实例以 `-startup` 后台运行、无窗口、无托盘图标。v1.2.2 修正 ini 键名为合法的 `http_server_enabled=1`，检索时等待索引就绪（冷启动重建约 80s，期间提示"正在建立本地文件索引"），应用退出时保存数据库使下次启动数秒内可用。 |
 | 网络 | 需能访问 `ima.qq.com` | 仅 ima 检索需要；本地检索纯内网。 |
+| 百度网盘 | 可选（v1.3.0 起） | 需在[百度网盘开放平台](https://pan.baidu.com/union/)自建应用取得 Client ID / Secret，并在软件内完成一次设备码授权（浏览器输码）。仅网盘文件检索需要，不影响本地 / ima 检索。 |
 | ima 凭证 | Client ID / API Key | 仅 ima 检索需要，在 [ima 开放平台](https://ima.qq.com/agent-interface) 申请。 |
 
 ---
@@ -117,11 +119,12 @@ venv/Scripts/python.exe main.py
 10. **表格**：结果表格每列宽可拖动调整，表头还可拖动换列序。
 11. **系统托盘**：关闭主窗口不会退出程序，而是**最小化到 Windows 右下角系统托盘**（状态栏提示"已最小化到系统托盘，右键托盘图标可退出"）。**双击托盘图标**或右键菜单「显示主窗口」可恢复窗口；右键菜单「退出 SuperSearch」才真正退出程序（退出时会一并关掉内置 Everything 便携版）。
 12. **Everything 后台静默运行**：内置 Everything 以 `-startup` 方式在后台提供 HTTP 检索服务，**不显示其搜索窗口、也无托盘图标**；NTFS 索引经由安装器装好的 Everything 服务完成，因此**不会弹出“需要管理员权限索引 NTFS”对话框、也不触发 UAC**。
+13. **百度网盘**：勾选「百度网盘」后，首次使用需授权（菜单「设置 → 百度网盘授权…」）：填入百度开放平台应用的 Client ID / Secret → 在浏览器中打开授权页并输入用户码 → 自动完成授权（设备码 5 分钟内有效）。之后检索即包含网盘文件（文件名关键词、全盘）；**双击结果在浏览器打开网盘并定位到所在目录**（不产生分享链接）。云端单次响应可能上千条，界面默认只展示前 100 条；「清除授权」可随时移除本机令牌（应用凭证保留）。
 
 ### 运行测试
 
 ```bash
-venv/Scripts/python.exe tests/smoke_test.py   # 68 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑 + 索引就绪等待 + 退出等待落盘）
+venv/Scripts/python.exe tests/smoke_test.py   # 100 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑 + 索引就绪等待 + 退出等待落盘 + 百度网盘授权/检索/映射）
 # 可选：无界面验证 GUI 可构造
 QT_QPA_PLATFORM=offscreen venv/Scripts/python.exe tests/verify_gui.py
 ```
@@ -165,12 +168,16 @@ venv/Scripts/python.exe tests/smoke_test.py
 ```
 main.py                 入口
 core/config.py          配置（ima 凭证 / Everything 端口 / 用户设置 Settings）
+core/baidu_pan.py       百度网盘开放平台客户端（设备码授权 + 关键词检索 + 令牌管理）
 core/models.py          统一结果模型 SearchResult（含 source 标签）
 core/format_sort.py     按文件格式优先级在客户端重排
 search/local_search.py  Everything HTTP 检索
 search/ima_search.py    ima OpenAPI 检索（受控并发 + 令牌桶限速 + 游标分页）
+search/baidu_search.py  百度网盘结果映射（SearchResult + 展示截断）
 ui/main_window.py       PySide6 主窗口（后台线程检索，合并列表）
 tests/smoke_test.py     纯逻辑冒烟测试
+CONTEXT.md              领域词汇表（glossary）
+docs/adr/               架构决策记录（ADR）
 SuperSearch.iss         Inno Setup 安装脚本（用于生成 setup.exe，见下）
 ```
 
@@ -188,6 +195,16 @@ ini 写入 `run_as_admin=0` / `run_in_background=1` / `show_tray_icon=0` / `auto
 `SuperSearch.exe --install-everything-service`（内部 `everything.exe -install-service`，服务以 SYSTEM
 后台运行、无界面），卸载时经 `--uninstall-everything-service` 移除；服务缺失时应用也会尝试补装一次
 （标准用户触发一次性 UAC）。`core/ev_bundler.py` 相应新增 `service_installed/install_service/uninstall_service`。
+
+**v1.3.0 新增百度网盘检索源**：新增 `core/baidu_pan.py`（OAuth 2.0 **设备码授权**：
+无回调地址，浏览器输 user_code 确认，轮询取令牌；access_token 30 天有效、
+剩余不足 5 天自动用 refresh_token 续期）与 `search/baidu_search.py`（文件名
+**关键词检索**，全盘覆盖，支持目录/文件类型过滤；云端响应上千条时按展示上限
+截断，默认 100 条）。应用凭证与用户令牌只存本机
+`%APPDATA%\SuperSearch\baidu_netdisk.json`（`.gitignore` 已忽略；卸载时经
+安装脚本清理）。双击网盘结果执行**结果目录定位**（打开网页版网盘并定位到所在
+目录，不产生分享链接）。语义检索（`/xpan/unisearch`，文档内容/OCR/ASR）因
+非 VIP 账号实测不可用，留作后续增量——决策见 `docs/adr/`。
 
 **v1.2.2 修复 HTTP 服务器启用 + 索引就绪等待**：修正 ini 键名（`http_server=1` → 合法的
 `http_server_enabled=1`，并补上 `[Everything]` 节头——v1.2.1 升级用户本地检索不可用的根因）；
@@ -226,7 +243,7 @@ venv/Scripts/python.exe -m PyInstaller --noconfirm --clean build/SuperSearch.spe
 #  → dist/SuperSearch.exe（已带应用图标、版本信息、内嵌 Everything）
 ```
 > 说明：`build/SuperSearch.spec` 已固定图标（`assets/SuperSearch.ico`）、版本文件
-> （`version_info.txt`，现为 1.2.2）、并把 `vendor/Everything` 作为 data 文件打进包内；
+> （`version_info.txt`，现为 1.3.0）、并把 `vendor/Everything` 作为 data 文件打进包内；
 > 不需要手动加 `--add-data` 或 `--icon`。PyInstaller 的 PySide6 钩子会自动带上 Qt 平台插件。
 
 ### 生成"可安装"的 setup.exe
@@ -306,3 +323,6 @@ venv/Scripts/python.exe -m PyInstaller --noconfirm --clean build/SuperSearch.spe
 | ima 检索部分知识库提示 `请求频率超限 (code 200001)` | ima 为账户级限流。工具已对限流做指数退避重试（最多 4 次，0.5/1/2/4 秒）并在库间限速 0.15 秒；绝大多数情况下重试后即可成功。若极偶发仍有个别库失败，稍后重试即可。 |
 | ima 检索部分知识库提示 `资料获取次数已达上限，请明天再尝试` | 这是 ima 的**每日调取次数配额**（与 `200001` 限流不同，是日级上限），并非代码 bug，也无法靠重试绕过——重试反而更费额度。账号当天检索次数已用尽。**解决**：缩小检索范围（设置 `IMA_KB_IDS` 只检常用库，而非每次都跨全部几十个库），或等次日额度重置。 |
 | 本地结果排序与 Everything 不一致 | Everything 默认按「名称升序」；若你的 Everything GUI 改过排序列/方向，请在界面「排序」下拉框选对应的 名称/路径/大小/修改时间 × 升/降。排序由 Everything 服务端完成（名称是自然序，file2 在 file10 前），与 Everything 本身保持一致。 |
+| 百度网盘提示"未授权"或勾选后报警 | 设置 → 百度网盘授权…：先在百度网盘开放平台（pan.baidu.com/union）自建应用取得 Client ID / Secret，再完成设备码授权（浏览器输用户码）。未授权时该源不参与检索，不影响本地 / ima。 |
+| 百度网盘检索失败（错误码 -6） | 授权失效（令牌被撤或异常）：重新走一次「设置 → 百度网盘授权…」即可。 |
+| 百度网盘只返回前 100 条 | 云端单次响应可能上千条，界面按展示上限截断（默认 100）。可改 settings.json 的 `baidu_limit`（1-500）调整。 |

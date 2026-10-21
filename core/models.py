@@ -12,7 +12,7 @@ from typing import Optional
 
 @dataclass
 class SearchResult:
-    # 来源标识："local" 本地文件 / "ima" ima 知识库
+    # 来源标识："local" 本地文件 / "ima" ima 知识库 / "baidu" 百度网盘
     source: str
     # 标题 / 文件名
     title: str
@@ -34,4 +34,8 @@ class SearchResult:
     kb_id: str = ""
 
     def source_label(self) -> str:
-        return "本地" if self.source == "local" else "ima"
+        if self.source == "local":
+            return "本地"
+        if self.source == "baidu":
+            return "百度网盘"
+        return "ima"

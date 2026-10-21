@@ -8,6 +8,8 @@
 import os
 import sys
 import time
+import shutil
+import tempfile
 import unittest
 import subprocess
 from datetime import datetime, timezone
@@ -17,10 +19,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import config as cfg_mod
 from core import ev_bundler
+from core import baidu_pan
 from core.config import Settings, load_settings, save_settings, EverythingConfig
 from core import format_sort
 from core.models import SearchResult
-from search import local_search, ima_search
+from search import local_search, ima_search, baidu_search
 
 
 class TestConfig(unittest.TestCase):
@@ -1220,6 +1223,464 @@ class TestTray(unittest.TestCase):
         win.closeEvent(evt)
         self.assertTrue(win.isHidden(), "有关闭事件时应最小化到托盘而非退出")
         self.assertFalse(evt.isAccepted(), "最小化到托盘时 closeEvent 应 ignore")
+
+
+class _FakeResp:
+    """最小 HTTP 响应假件：仅需 .json()。"""
+
+    def __init__(self, data):
+        self._data = data
+
+    def json(self):
+        return self._data
+
+
+class TestBaiduPan(unittest.TestCase):
+    """百度网盘客户端：令牌存取、设备码授权、轮询、刷新、检索。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.token_file = os.path.join(self.tmpdir, "baidu_netdisk.json")
+        os.environ["BAIDU_TOKEN_FILE"] = self.token_file
+
+    def tearDown(self):
+        os.environ.pop("BAIDU_TOKEN_FILE", None)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # ---------- 令牌存取 ----------
+
+    def test_token_path_env_override_and_dev_default(self):
+        # 环境变量优先（测试隔离用）；开发环境（未 frozen）落仓库根
+        self.assertEqual(baidu_pan.token_path(),
+                         __import__("pathlib").Path(self.token_file))
+        os.environ.pop("BAIDU_TOKEN_FILE", None)
+        with mock.patch.object(sys, "frozen", False, create=True):
+            p = baidu_pan.token_path()
+        self.assertTrue(str(p).replace("\\", "/").endswith(
+            "ima-everything-search/baidu_netdisk.json"))
+
+    def test_token_roundtrip_and_states(self):
+        # 空 -> 存应用凭证(configured) -> 存令牌(authorized) -> 清除令牌
+        self.assertEqual(baidu_pan.authorization_state(), "none")
+        self.assertFalse(baidu_pan.has_authorization())
+        baidu_pan.save_app_credentials("cid", "secret")
+        self.assertEqual(baidu_pan.authorization_state(), "configured")
+        self.assertTrue(baidu_pan.has_app_credentials())
+        baidu_pan.save_token({
+            "access_token": "a1", "refresh_token": "r1",
+            "expires_at": time.time() + 30 * 86400, "scope": "basic,netdisk",
+        })
+        self.assertEqual(baidu_pan.authorization_state(), "authorized")
+        t = baidu_pan.load_token()
+        self.assertEqual(t["client_id"], "cid")  # 合并写不丢应用凭证
+        self.assertEqual(t["access_token"], "a1")
+        baidu_pan.clear_token()
+        t = baidu_pan.load_token()
+        self.assertIsNone(t.get("access_token"))
+        self.assertIsNone(t.get("refresh_token"))
+        self.assertEqual(t.get("client_id"), "cid")  # 保留应用凭证
+        self.assertEqual(baidu_pan.authorization_state(), "configured")
+
+    def test_load_token_corrupt_file_returns_none(self):
+        with open(self.token_file, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertIsNone(baidu_pan.load_token())
+
+    # ---------- 设备码请求 ----------
+
+    def test_request_device_code_params(self):
+        seen = {}
+
+        def fake_post(url, data=None, timeout=None):
+            seen["url"] = url
+            seen["data"] = data
+            return _FakeResp({
+                "device_code": "dc1", "user_code": "uc1",
+                "verification_url": "https://openapi.baidu.com/device",
+                "qrcode_url": "", "expires_in": 300, "interval": 5,
+            })
+
+        with mock.patch.object(baidu_pan.requests, "post", side_effect=fake_post):
+            info = baidu_pan.request_device_code("cid")
+        self.assertEqual(seen["url"], baidu_pan.OAUTH_DEVICE_CODE_URL)
+        self.assertEqual(seen["data"]["client_id"], "cid")
+        self.assertEqual(seen["data"]["response_type"], "device_code")
+        self.assertEqual(seen["data"]["scope"], "basic,netdisk")
+        self.assertEqual(info["user_code"], "uc1")
+
+    def test_request_device_code_error(self):
+        with mock.patch.object(baidu_pan.requests, "post",
+                               return_value=_FakeResp({"error": "invalid_client"})):
+            with self.assertRaises(baidu_pan.BaiduAuthError):
+                baidu_pan.request_device_code("cid")
+
+    # ---------- 轮询授权 ----------
+
+    def test_poll_pending_then_success(self):
+        responses = [
+            _FakeResp({"error": "authorization_pending"}),
+            _FakeResp({"access_token": "a1", "expires_in": 2592000,
+                       "refresh_token": "r1", "scope": "basic,netdisk"}),
+        ]
+        sleeps = []
+
+        def fake_sleep(s):
+            sleeps.append(s)
+
+        with mock.patch.object(baidu_pan.requests, "post",
+                               side_effect=responses), \
+                mock.patch.object(baidu_pan.time, "sleep", side_effect=fake_sleep):
+            token = baidu_pan.poll_device_token(
+                "dc1", "cid", "secret", interval=5, timeout=300)
+        self.assertEqual(token["access_token"], "a1")
+        # 轮询间隔必须 >= 5s（百度要求）
+        self.assertTrue(sleeps and all(s >= 5.0 for s in sleeps), sleeps)
+        # 成功后令牌已落盘
+        self.assertEqual(baidu_pan.load_token()["access_token"], "a1")
+        self.assertGreater(baidu_pan.load_token()["expires_at"], time.time())
+
+    def test_poll_slow_down_increases_interval(self):
+        responses = [
+            _FakeResp({"error": "slow_down"}),
+            _FakeResp({"access_token": "a1", "expires_in": 2592000,
+                       "refresh_token": "r1"}),
+        ]
+        sleeps = []
+
+        with mock.patch.object(baidu_pan.requests, "post",
+                               side_effect=responses), \
+                mock.patch.object(baidu_pan.time, "sleep",
+                                  side_effect=lambda s: sleeps.append(s)):
+            baidu_pan.poll_device_token("dc1", "cid", "secret", interval=5)
+        # slow_down 后间隔应 +5s（>=10）
+        self.assertTrue(any(s >= 10.0 for s in sleeps), sleeps)
+
+    def test_poll_expired_and_denied_raise(self):
+        with mock.patch.object(baidu_pan.requests, "post",
+                               return_value=_FakeResp({"error": "expired_token"})):
+            with self.assertRaises(baidu_pan.BaiduAuthError):
+                baidu_pan.poll_device_token("dc1", "cid", "secret")
+        with mock.patch.object(baidu_pan.requests, "post",
+                               return_value=_FakeResp({"error": "access_denied"})):
+            with self.assertRaises(baidu_pan.BaiduAuthError):
+                baidu_pan.poll_device_token("dc1", "cid", "secret")
+
+    def test_poll_should_stop_returns_none_without_request(self):
+        calls = []
+
+        def fake_post(*a, **k):
+            calls.append(1)
+            return _FakeResp({"error": "authorization_pending"})
+
+        with mock.patch.object(baidu_pan.requests, "post", side_effect=fake_post), \
+                mock.patch.object(baidu_pan.time, "sleep"):
+            token = baidu_pan.poll_device_token(
+                "dc1", "cid", "secret", should_stop=lambda: True)
+        self.assertIsNone(token)
+        self.assertEqual(calls, [])
+
+    def test_poll_network_error_keeps_waiting_until_deadline(self):
+        def fake_post(*a, **k):
+            raise baidu_pan.requests.RequestException("boom")
+
+        clock = [1000.0]
+
+        def fake_monotonic():
+            clock[0] += 60.0  # 每次检查都推进 60s，越过 300s 截止
+            return clock[0]
+
+        with mock.patch.object(baidu_pan.requests, "post", side_effect=fake_post), \
+                mock.patch.object(baidu_pan.time, "sleep"), \
+                mock.patch.object(baidu_pan.time, "monotonic", fake_monotonic):
+            with self.assertRaises(baidu_pan.BaiduAuthError):
+                baidu_pan.poll_device_token("dc1", "cid", "secret", timeout=300)
+
+    # ---------- 续期 ----------
+
+    def test_refresh_when_near_expiry(self):
+        baidu_pan.save_token({
+            "client_id": "cid", "client_secret": "secret",
+            "access_token": "old", "refresh_token": "r1",
+            "expires_at": time.time() + 2 * 86400,  # 剩 2 天 < 5 天边际
+        })
+        with mock.patch.object(baidu_pan.requests, "post",
+                               return_value=_FakeResp({
+                                   "access_token": "new",
+                                   "expires_in": 2592000,
+                                   "refresh_token": "r2",
+                                   "scope": "basic,netdisk"})):
+            tok = baidu_pan.refresh_token()
+        self.assertEqual(tok["access_token"], "new")
+        self.assertEqual(tok["refresh_token"], "r2")  # 新 refresh_token 生效
+        self.assertGreater(tok["expires_at"], time.time() + 20 * 86400)
+
+    def test_no_refresh_when_fresh(self):
+        baidu_pan.save_token({
+            "client_id": "cid", "client_secret": "secret",
+            "access_token": "a1", "refresh_token": "r1",
+            "expires_at": time.time() + 20 * 86400,
+        })
+        with mock.patch.object(baidu_pan.requests, "post") as m_post:
+            tok = baidu_pan.ensure_token()
+        m_post.assert_not_called()
+        self.assertEqual(tok["access_token"], "a1")
+
+    def test_ensure_token_without_authorization_raises(self):
+        with self.assertRaises(baidu_pan.BaiduAuthError):
+            baidu_pan.ensure_token()
+
+    # ---------- 关键词检索 ----------
+
+    def _fresh_token(self):
+        baidu_pan.save_token({
+            "client_id": "cid", "client_secret": "secret",
+            "access_token": "a1", "refresh_token": "r1",
+            "expires_at": time.time() + 20 * 86400,
+        })
+
+    def test_search_files_params_and_mapping(self):
+        self._fresh_token()
+        seen = {}
+
+        def fake_get(url, params=None, timeout=None):
+            seen["url"] = url
+            seen["params"] = params
+            return _FakeResp({"errno": 0, "has_more": 0, "list": [
+                {"fsid": 1, "path": "/a/b.txt", "server_filename": "b.txt",
+                 "isdir": 0, "size": 10, "server_mtime": 1700000000},
+                {"fsid": 2, "path": "/a", "server_filename": "a",
+                 "isdir": 1, "size": 0, "server_mtime": 0},
+            ]})
+
+        with mock.patch.object(baidu_pan.requests, "get", side_effect=fake_get):
+            items, err = baidu_pan.search_files("b.txt")
+        self.assertIsNone(err)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(seen["url"], baidu_pan.FILE_SEARCH_URL)
+        p = seen["params"]
+        self.assertEqual(p["method"], "search")
+        self.assertEqual(p["access_token"], "a1")
+        self.assertEqual(p["key"], "b.txt")
+        self.assertEqual(p["dir"], "/")
+        self.assertEqual(p["recursion"], 1)
+
+    def test_search_key_truncated_to_30_chars(self):
+        self._fresh_token()
+        seen = {}
+
+        def fake_get(url, params=None, timeout=None):
+            seen["params"] = params
+            return _FakeResp({"errno": 0, "list": []})
+
+        with mock.patch.object(baidu_pan.requests, "get", side_effect=fake_get):
+            baidu_pan.search_files("x" * 40)
+        self.assertEqual(len(seen["params"]["key"]), 30)
+
+    def test_search_category_param_sent_when_given(self):
+        self._fresh_token()
+        seen = {}
+
+        def fake_get(url, params=None, timeout=None):
+            seen["params"] = params
+            return _FakeResp({"errno": 0, "list": []})
+
+        with mock.patch.object(baidu_pan.requests, "get", side_effect=fake_get):
+            baidu_pan.search_files("合同", dir="/资料", category=4, num=100)
+        self.assertEqual(seen["params"]["category"], 4)
+        self.assertEqual(seen["params"]["dir"], "/资料")
+        self.assertEqual(seen["params"]["num"], 100)
+
+    def test_search_token_invalid_refreshes_and_retries(self):
+        self._fresh_token()
+        get_calls = []
+
+        def fake_get(url, params=None, timeout=None):
+            get_calls.append(params)
+            if len(get_calls) == 1:
+                return _FakeResp({"errno": -6, "errmsg": "no permission"})
+            return _FakeResp({"errno": 0, "list": [
+                {"fsid": 9, "path": "/x.txt", "server_filename": "x.txt",
+                 "isdir": 0, "size": 1, "server_mtime": 1700000000}]})
+
+        # errno -6 时先刷新（令牌"新鲜"不会真正发刷新请求，直接重试）
+        with mock.patch.object(baidu_pan.requests, "get", side_effect=fake_get):
+            items, err = baidu_pan.search_files("x")
+        self.assertIsNone(err)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(len(get_calls), 2)  # 确实重试了一次
+
+    def test_search_token_invalid_persistent_returns_reauth_msg(self):
+        self._fresh_token()
+        with mock.patch.object(baidu_pan.requests, "get",
+                               return_value=_FakeResp({"errno": -6, "errmsg": "no permission"})):
+            items, err = baidu_pan.search_files("x")
+        self.assertEqual(items, [])
+        self.assertIn("重新授权", err)
+
+    def test_search_other_errno_passthrough(self):
+        self._fresh_token()
+        with mock.patch.object(baidu_pan.requests, "get",
+                               return_value=_FakeResp({"errno": 2, "errmsg": "param error"})):
+            items, err = baidu_pan.search_files("x")
+        self.assertEqual(items, [])
+        self.assertIn("2", err)
+        self.assertIn("param error", err)
+
+    def test_search_network_error(self):
+        self._fresh_token()
+
+        def fake_get(*a, **k):
+            raise baidu_pan.requests.RequestException("timeout")
+
+        with mock.patch.object(baidu_pan.requests, "get", side_effect=fake_get):
+            items, err = baidu_pan.search_files("x")
+        self.assertEqual(items, [])
+        self.assertIn("连接百度网盘失败", err)
+
+    def test_disk_home_url_encoding(self):
+        url = baidu_pan.disk_home_url("/雅思/听力")
+        self.assertTrue(url.startswith("https://pan.baidu.com/disk/home#/all?path="))
+        # 路径须整体 URL 编码（含斜杠），中文与 / 都不裸奔
+        self.assertIn("%2F", url)
+        self.assertNotIn("雅思", url)
+
+
+class TestBaiduSearch(unittest.TestCase):
+    """百度网盘结果映射层。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["BAIDU_TOKEN_FILE"] = os.path.join(
+            self.tmpdir, "baidu_netdisk.json")
+
+    def tearDown(self):
+        os.environ.pop("BAIDU_TOKEN_FILE", None)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _save_token(self):
+        baidu_pan.save_token({
+            "client_id": "cid", "client_secret": "secret",
+            "access_token": "a1", "refresh_token": "r1",
+            "expires_at": time.time() + 20 * 86400,
+        })
+
+    def test_search_baidu_unauthenticated(self):
+        results, errors = baidu_search.search_baidu("合同")
+        self.assertEqual(results, [])
+        self.assertTrue(errors and "未授权" in errors[0])
+
+    def test_search_baidu_empty_query(self):
+        results, errors = baidu_search.search_baidu("   ")
+        self.assertEqual((results, errors), ([], []))
+
+    def test_search_baidu_mapping_and_limit(self):
+        self._save_token()
+        raw = [
+            {"fsid": 1, "path": "/a/b.txt", "server_filename": "b.txt",
+             "isdir": 0, "size": 2048, "server_mtime": 1700000000},
+            {"fsid": 2, "path": "/a/文件夹", "server_filename": "文件夹",
+             "isdir": 1, "size": 0, "server_mtime": 0},
+            {"fsid": 3, "path": "/c.pdf", "server_filename": "c.pdf",
+             "isdir": 0, "size": 10, "server_mtime": 1690000000},
+        ]
+        with mock.patch.object(baidu_pan, "search_files",
+                               return_value=(raw, None)):
+            results, errors = baidu_search.search_baidu("a", limit=2)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)  # 展示上限截断
+        r0, r1 = results
+        self.assertEqual(r0.source, "baidu")
+        self.assertEqual(r0.title, "b.txt")
+        self.assertEqual(r0.path, "/a/b.txt")
+        self.assertEqual(r0.kind, "")
+        self.assertEqual(r0.size, 2048)
+        self.assertIsInstance(r0.modified, datetime)
+        self.assertEqual(r0.ref_id, "1")
+        # 文件夹：kind=folder、size 0 按未知(None)、mtime 0 -> None
+        self.assertEqual(r1.kind, "folder")
+        self.assertIsNone(r1.size)
+        self.assertIsNone(r1.modified)
+
+    def test_search_baidu_error_passthrough(self):
+        self._save_token()
+        with mock.patch.object(baidu_pan, "search_files",
+                               return_value=([], "百度网盘检索失败（错误码 2：x）")):
+            results, errors = baidu_search.search_baidu("a")
+        self.assertEqual(results, [])
+        self.assertEqual(errors, ["百度网盘检索失败（错误码 2：x）"])
+
+    def test_search_baidu_skips_invalid_items(self):
+        self._save_token()
+        raw = [
+            {"fsid": 1, "path": "/a.txt", "server_filename": "a.txt",
+             "isdir": 0, "size": 1, "server_mtime": 1700000000},
+            {"fsid": 2, "path": "", "server_filename": "缺路径"},  # 无路径 -> 跳过
+            {"path": "/无fsid.txt", "server_filename": "x"},          # 无 fsid -> 跳过
+        ]
+        with mock.patch.object(baidu_pan, "search_files",
+                               return_value=(raw, None)):
+            results, _ = baidu_search.search_baidu("a")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].path, "/a.txt")
+
+    def test_category_name(self):
+        self.assertEqual(baidu_search.category_name(4), "文档")
+        self.assertEqual(baidu_search.category_name(1), "视频")
+        self.assertEqual(baidu_search.category_name(99), "")
+        self.assertEqual(baidu_search.category_name(None), "")
+
+
+class TestBaiduUiBinding(unittest.TestCase):
+    """百度网盘 UI 绑定的轻量校验（不构造主窗口，避免触发后端探测）。"""
+
+    def test_source_label_and_color(self):
+        self.assertEqual(
+            SearchResult(source="baidu", title="x").source_label(), "百度网盘")
+        from ui import main_window
+        self.assertTrue(main_window.COLOR_BAIDU.isValid())
+
+    def test_worker_signature_has_baidu_params(self):
+        import inspect
+        from ui import main_window
+        sig = inspect.signature(main_window.SearchWorker.__init__)
+        self.assertIn("do_baidu", sig.parameters)
+        self.assertIn("baidu_limit", sig.parameters)
+
+    def test_dialogs_exist(self):
+        from ui import main_window
+        self.assertTrue(hasattr(main_window, "BaiduCredsDialog"))
+        self.assertTrue(hasattr(main_window, "BaiduDeviceAuthDialog"))
+        self.assertTrue(hasattr(main_window, "_DeviceAuthPollThread"))
+
+    def test_creds_dialog_roundtrip(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from ui import main_window
+        app = QApplication.instance() or QApplication([])
+        dlg = main_window.BaiduCredsDialog()
+        dlg.edit_cid.setText("cid")
+        dlg.edit_secret.setText("sec")
+        self.assertEqual(dlg.get_credentials(), ("cid", "sec"))
+
+    def test_settings_baidu_fields_roundtrip(self):
+        # Settings 新字段：默认值 + 存档/读回
+        s = Settings()
+        self.assertFalse(s.baidu_enabled)
+        self.assertEqual(s.baidu_limit, 100)
+        d = tempfile.mkdtemp()
+        try:
+            p = cfg_mod.settings_path()
+            with mock.patch.object(cfg_mod, "settings_path",
+                                   return_value=__import__("pathlib").Path(d) / "settings.json"):
+                s.baidu_enabled = True
+                s.baidu_limit = 50
+                cfg_mod.save_settings(s)
+                back = cfg_mod.load_settings()
+            self.assertTrue(back.baidu_enabled)
+            self.assertEqual(back.baidu_limit, 50)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        _ = p
 
 
 if __name__ == "__main__":

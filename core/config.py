@@ -147,6 +147,10 @@ class Settings:
     ima_burst: int = 2           # 令牌桶突发容量（最大瞬时并发）
     # 同名结果归组：把本地与 ima 中同名的结果排在一起（混排，不再分本地/ima 两部分）
     group_by_name: bool = True
+    # 是否检索百度网盘（授权后默认勾选；未授权时保持不勾，避免每次启动报警）
+    baidu_enabled: bool = False
+    # 百度网盘结果展示上限（云端单次响应可能上千条，客户端截断）
+    baidu_limit: int = 100
 
 
 def settings_path() -> Path:
@@ -198,6 +202,8 @@ def load_settings() -> Settings:
                 ima_req_per_sec=_clamp_float(data.get("ima_req_per_sec", 4.0), 0.5, 50.0, 4.0),
                 ima_burst=_clamp_int(data.get("ima_burst", 2), 1, 16, 2),
                 group_by_name=bool(data.get("group_by_name", True)),
+                baidu_enabled=bool(data.get("baidu_enabled", False)),
+                baidu_limit=_clamp_int(data.get("baidu_limit", 100), 1, 500, 100),
             )
         except (json.JSONDecodeError, OSError, ValueError):
             pass
@@ -215,6 +221,8 @@ def save_settings(s: Settings) -> None:
         "ima_req_per_sec": s.ima_req_per_sec,
         "ima_burst": s.ima_burst,
         "group_by_name": s.group_by_name,
+        "baidu_enabled": s.baidu_enabled,
+        "baidu_limit": s.baidu_limit,
     }
     p.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

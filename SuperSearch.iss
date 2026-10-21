@@ -16,7 +16,7 @@
 ; ============================================================================
 
 #define MyAppName "SuperSearch"
-#define MyAppVersion "1.2.2"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Jiahui Zou"
 #define MyAppExeName "SuperSearch.exe"
 #define MyAppIco "assets\SuperSearch.ico"
@@ -74,9 +74,12 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
     Flags: nowait postinstall skipifsilent
 
 ; 卸载时清理：内置 Everything 的运行数据（位于 %LOCALAPPDATA%\SuperSearch）、
-; 以及尝试退出仍可能在运行的内置 Everything 实例（best-effort）。
+; 百度网盘应用凭证与用户令牌（%APPDATA%\SuperSearch\baidu_netdisk.json，
+; 与 settings.json 同目录，整个目录仅这两类文件），以及尝试退出仍可能在运行的
+; 内置 Everything 实例（best-effort）。
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\SuperSearch"
+Type: filesandordirs; Name: "{userappdata}\SuperSearch"
 
 [UninstallRun]
 ; 退出内置 Everything 独立实例（若仍在运行）；失败不影响卸载流程

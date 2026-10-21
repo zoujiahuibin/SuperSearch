@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 from typing import List, Optional
 
-from PySide6.QtCore import QThread, Signal, QFileInfo, QSize, Qt, QDir
+from PySide6.QtCore import QThread, Signal, QFileInfo, QSize, Qt, QDir, QTimer
 from PySide6.QtGui import QDesktopServices, QColor, QAction, QIcon, QPixmap
 from PySide6.QtCore import QUrl, QUrlQuery
 from PySide6.QtWidgets import (
@@ -59,13 +59,15 @@ from core.config import (
 )
 from core import format_sort
 from core import ev_bundler
+from core import baidu_pan
 from core.models import SearchResult
-from search import local_search, ima_search
+from search import local_search, ima_search, baidu_search
 
 
 # 来源标签配色
 COLOR_LOCAL = QColor("#1565C0")  # 蓝
 COLOR_IMA = QColor("#2E7D32")    # 绿
+COLOR_BAIDU = QColor("#EF6C00")  # 橙（百度网盘）
 
 def _detect_drives() -> List[str]:
     """检测本机存在的盘符字母（Windows）。非 Windows 返回 ["C"] 兜底。"""
@@ -136,7 +138,8 @@ class SearchWorker(QThread):
     def __init__(self, query: str, ev_cfg: EverythingConfig, ima_cfg: ImaConfig,
                  kb_ids, do_local: bool, do_ima: bool, ima_max_workers: int = 4,
                  ima_req_per_sec: float = 4.0, ima_burst: int = 2,
-                 local_drives: List[str] = None, ima_kb_types: List[str] = None):
+                 local_drives: List[str] = None, ima_kb_types: List[str] = None,
+                 do_baidu: bool = False, baidu_limit: int = 100):
         super().__init__()
         self.query = query
         self.ev_cfg = ev_cfg
@@ -152,14 +155,31 @@ class SearchWorker(QThread):
         self.ima_max_workers = ima_max_workers
         self.ima_req_per_sec = ima_req_per_sec
         self.ima_burst = ima_burst
+        # 百度网盘源（单请求关键词检索，展示上限见 baidu_limit）
+        self.do_baidu = do_baidu
+        self.baidu_limit = baidu_limit
 
     def run(self):
         results: List[SearchResult] = []
         has_local = self.do_local
         has_ima = self.do_ima
+        has_baidu = self.do_baidu
 
-        # 阶段权重：本地检索（快）占前 20%，ima 跨库检索（慢）占后 80%，
-        # 以便状态栏百分比能平滑反映整体进度。
+        # 阶段权重：本地检索（快）20%、ima 跨库检索（慢）70%、
+        # 百度网盘（单请求）10%；按实际勾选的源归一化，百分比才能平滑
+        # 反映整体进度（只勾一个源时即 0-100 全程归该源）。
+        w_local, w_ima, w_baidu = 20.0, 70.0, 10.0
+        total_w = ((w_local if has_local else 0.0)
+                   + (w_ima if has_ima else 0.0)
+                   + (w_baidu if has_baidu else 0.0))
+        if total_w <= 0:
+            self.result_ready.emit(results)
+            return
+        done_w = 0.0
+
+        def _emit_pct():
+            self.progress_pct.emit(int(round(done_w / total_w * 100)))
+
         if has_local:
             self.progress.emit("正在检索本地文件（Everything）…")
             self.progress_pct.emit(0)
@@ -181,10 +201,8 @@ class SearchWorker(QThread):
                     self.error_ready.emit(f"本地检索失败：{e}")
             else:
                 self.error_ready.emit(ev_note or "本地检索不可用")
-            if has_ima:
-                self.progress_pct.emit(20)
-            else:
-                self.progress_pct.emit(100)
+            done_w += w_local
+            _emit_pct()
 
         if has_ima:
             self.progress.emit("正在检索 ima 知识库…")
@@ -193,8 +211,7 @@ class SearchWorker(QThread):
                 if total <= 0:
                     return
                 frac = done / total
-                # 本地占 20%，ima 占剩余 80%
-                pct = (20 + frac * 80) if has_local else (frac * 100)
+                pct = (done_w + frac * w_ima) / total_w * 100
                 self.progress_pct.emit(int(round(pct)))
                 # 额外给出可读进度：已检索 N/Y 个库，已得 M 条结果
                 self.progress.emit(
@@ -214,7 +231,21 @@ class SearchWorker(QThread):
                     self.error_ready.emit(e)
             except Exception as e:  # noqa: BLE001
                 self.error_ready.emit(f"ima 检索失败：{e}")
-            self.progress_pct.emit(100)
+            done_w += w_ima
+            _emit_pct()
+
+        if has_baidu:
+            self.progress.emit("正在检索百度网盘…")
+            try:
+                bd_res, bd_errs = baidu_search.search_baidu(
+                    self.query, limit=self.baidu_limit)
+                results.extend(bd_res)
+                for e in bd_errs:
+                    self.error_ready.emit(e)
+            except Exception as e:  # noqa: BLE001
+                self.error_ready.emit(f"百度网盘检索失败：{e}")
+            done_w += w_baidu
+            _emit_pct()
 
         self.result_ready.emit(results)
 
@@ -304,6 +335,9 @@ class MainWindow(QMainWindow):
         act_speed = QAction("ima 提速（并发）…", self)
         act_speed.triggered.connect(self.open_concurrency)
         settings_menu.addAction(act_speed)
+        act_baidu = QAction("百度网盘授权…", self)
+        act_baidu.triggered.connect(self.open_baidu_auth)
+        settings_menu.addAction(act_baidu)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -312,7 +346,7 @@ class MainWindow(QMainWindow):
         # 搜索栏
         top = QHBoxLayout()
         self.input = QLineEdit()
-        self.input.setPlaceholderText("输入关键词，回车检索（同时搜本地与 ima）")
+        self.input.setPlaceholderText("输入关键词，回车检索（本地 / ima / 百度网盘）")
         self.input.returnPressed.connect(self.on_search)
         self.btn_search = QPushButton("检索")
         self.btn_search.clicked.connect(self.on_search)
@@ -320,10 +354,16 @@ class MainWindow(QMainWindow):
         self.chk_local.setChecked(True)
         self.chk_ima = QCheckBox("ima 知识库")
         self.chk_ima.setChecked(True)
+        self.chk_baidu = QCheckBox("百度网盘")
+        # 授权后默认勾选（持久化在 settings.baidu_enabled）；未授权保持不勾，
+        # 避免每次启动都弹"未授权"提示
+        self.chk_baidu.setChecked(self.settings.baidu_enabled)
+        self.chk_baidu.setToolTip("检索百度账号网盘文件（需先授权：设置 → 百度网盘授权…）")
         top.addWidget(self.input, 3)
         top.addWidget(self.btn_search)
         top.addWidget(self.chk_local)
         top.addWidget(self.chk_ima)
+        top.addWidget(self.chk_baidu)
 
         # 本地盘符勾选面板：勾选「本地」后出现，限定本地检索范围（C盘 / E盘 等）。
         # 默认全部勾选（等价于检索所有盘符）；取消某些盘符即只搜剩余盘符。
@@ -358,6 +398,26 @@ class MainWindow(QMainWindow):
         self.chk_ima.toggled.connect(self._on_ima_toggled)
         self.kbtype_panel.setVisible(self.chk_ima.isChecked())
         root.addWidget(self.kbtype_panel)
+
+        # 百度网盘面板：勾选「百度网盘」后出现，显示授权三态与授权入口
+        # （none 未配置凭证 / configured 有凭证未授权 / authorized 已授权）。
+        self.baidu_panel = QWidget()
+        self.baidu_row = QHBoxLayout(self.baidu_panel)
+        self.baidu_row.setContentsMargins(0, 0, 0, 0)
+        self.baidu_row.addWidget(QLabel("百度网盘:"))
+        self.baidu_status = QLabel("")
+        self.baidu_row.addWidget(self.baidu_status)
+        self.btn_baidu_auth = QPushButton("授权…")
+        self.btn_baidu_auth.clicked.connect(self.open_baidu_auth)
+        self.baidu_row.addWidget(self.btn_baidu_auth)
+        self.btn_baidu_clear = QPushButton("清除授权")
+        self.btn_baidu_clear.clicked.connect(self.clear_baidu_auth)
+        self.baidu_row.addWidget(self.btn_baidu_clear)
+        self.baidu_row.addStretch(1)
+        self.chk_baidu.toggled.connect(self._on_baidu_toggled)
+        self.baidu_panel.setVisible(self.chk_baidu.isChecked())
+        root.addWidget(self.baidu_panel)
+        self._refresh_baidu_status()
 
         # 排序选择器：对齐 Everything GUI 的排序列与方向
         top.addWidget(QLabel("排序："))
@@ -395,7 +455,7 @@ class MainWindow(QMainWindow):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("筛选："))
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["全部", "本地", "ima"])
+        self.filter_combo.addItems(["全部", "本地", "ima", "百度网盘"])
         self.filter_combo.currentTextChanged.connect(self.apply_filter)
         filter_row.addWidget(self.filter_combo)
         filter_row.addStretch(1)
@@ -435,6 +495,8 @@ class MainWindow(QMainWindow):
                     )
         if self.chk_ima.isChecked() and not self.ima_cfg.has_credentials:
             msgs.append("未配置 ima 凭证（client_id / api_key）")
+        if self.chk_baidu.isChecked() and baidu_pan.authorization_state() != "authorized":
+            msgs.append("百度网盘未授权（设置 → 百度网盘授权…）")
         if msgs:
             for m in msgs:
                 self.status.showMessage("⚠ " + m)
@@ -517,6 +579,8 @@ class MainWindow(QMainWindow):
             ima_burst=self.settings.ima_burst,
             local_drives=self._selected_drives(),
             ima_kb_types=self._selected_kb_types(),
+            do_baidu=self.chk_baidu.isChecked(),
+            baidu_limit=self.settings.baidu_limit,
         )
         self.worker.progress.connect(self.status.showMessage)
         self.worker.progress_pct.connect(self._on_progress_pct)
@@ -546,6 +610,56 @@ class MainWindow(QMainWindow):
     def _on_ima_toggled(self, checked: bool):
         """勾选/取消「ima 知识库」时显隐知识库类型选择面板。"""
         self.kbtype_panel.setVisible(checked)
+
+    def _on_baidu_toggled(self, checked: bool):
+        """勾选/取消「百度网盘」时显隐授权面板，并持久化该选择。"""
+        self.baidu_panel.setVisible(checked)
+        self.settings.baidu_enabled = checked
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+
+    def _refresh_baidu_status(self):
+        """按授权三态刷新百度面板的状态文本与按钮可用性。"""
+        state = baidu_pan.authorization_state()
+        if state == "authorized":
+            self.baidu_status.setText("已授权")
+            self.btn_baidu_auth.setText("重新授权…")
+            self.btn_baidu_clear.setEnabled(True)
+        elif state == "configured":
+            self.baidu_status.setText("已配置应用凭证，尚未授权")
+            self.btn_baidu_auth.setText("授权…")
+            self.btn_baidu_clear.setEnabled(False)
+        else:
+            self.baidu_status.setText("未配置（需百度开放平台应用凭证）")
+            self.btn_baidu_auth.setText("授权…")
+            self.btn_baidu_clear.setEnabled(False)
+
+    def open_baidu_auth(self):
+        """百度网盘授权入口：无应用凭证先填凭证，再走设备码授权流程。"""
+        if not baidu_pan.has_app_credentials():
+            dlg = BaiduCredsDialog(self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            cid, secret = dlg.get_credentials()
+            if not cid or not secret:
+                self.status.showMessage("⚠ 应用凭证不能为空")
+                return
+            baidu_pan.save_app_credentials(cid, secret)
+        dlg = BaiduDeviceAuthDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.status.showMessage("百度网盘授权成功")
+            # 授权后自动勾选来源，省去用户手动勾选
+            self.chk_baidu.setChecked(True)
+        self._refresh_baidu_status()
+
+    def clear_baidu_auth(self):
+        """清除百度网盘用户令牌（保留应用凭证），并取消来源勾选。"""
+        baidu_pan.clear_token()
+        self.chk_baidu.setChecked(False)
+        self._refresh_baidu_status()
+        self.status.showMessage("已清除百度网盘授权")
 
     def _selected_kb_types(self) -> Optional[List[str]]:
         """返回当前勾选的知识库类型标签列表（如 ["个人知识库", "订阅知识库"]）。
@@ -579,6 +693,8 @@ class MainWindow(QMainWindow):
             return [r for r in self.all_results if r.source == "local"]
         if src_text == "ima":
             return [r for r in self.all_results if r.source == "ima"]
+        if src_text == "百度网盘":
+            return [r for r in self.all_results if r.source == "baidu"]
         return self.all_results
 
     def apply_filter(self, src_text: str):
@@ -586,12 +702,16 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(data))
         for i, r in enumerate(data):
             src_item = QTableWidgetItem(r.source_label())
-            src_item.setForeground(COLOR_LOCAL if r.source == "local" else COLOR_IMA)
+            color = (COLOR_LOCAL if r.source == "local"
+                     else COLOR_IMA if r.source == "ima"
+                     else COLOR_BAIDU)
+            src_item.setForeground(color)
             self.table.setItem(i, 0, src_item)
             title_item = QTableWidgetItem(r.title)
             title_item.setIcon(self._icon_for(r))  # 系统文件/文件夹图标，与 Everything 一致
             self.table.setItem(i, 1, title_item)
-            loc = r.path if r.source == "local" else (r.kb_name or "ima")
+            loc = (r.path if r.source in ("local", "baidu")
+                   else (r.kb_name or "ima"))
             self.table.setItem(i, 2, QTableWidgetItem(loc))
             self.table.setItem(i, 3, QTableWidgetItem(_fmt_size(r.size)))
             self.table.setItem(i, 4, QTableWidgetItem(_fmt_dt(r.modified)))
@@ -612,6 +732,12 @@ class MainWindow(QMainWindow):
             lines.append(f"路径：{r.path}")
             lines.append(f"大小：{_fmt_size(r.size)}")
             lines.append(f"修改时间：{_fmt_dt(r.modified)}")
+        elif r.source == "baidu":
+            lines.append("类型：百度网盘" + ("文件夹" if r.kind == "folder" else "文件"))
+            lines.append(f"路径：{r.path}")
+            lines.append(f"大小：{_fmt_size(r.size)}")
+            lines.append(f"修改时间：{_fmt_dt(r.modified)}")
+            lines.append("双击将在浏览器打开网盘并定位到所在目录")
         else:
             lines.append(f"类型：ima 知识库文档")
             lines.append(f"知识库：{r.kb_name}")
@@ -634,7 +760,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _open_result(self, r: SearchResult):
-        """【打开】：与双击一致——本地打开文件；ima 取其直链用浏览器打开。"""
+        """【打开】：与双击一致——本地打开文件；ima 取其直链用浏览器打开；
+        百度网盘执行结果目录定位（打开网页版网盘并定位到所在目录）。"""
         if r.source == "local" and r.path:
             try:
                 if os.path.isfile(r.path):
@@ -645,6 +772,9 @@ class MainWindow(QMainWindow):
                 pass
         elif r.source == "ima":
             self._open_ima(r)
+        elif r.source == "baidu" and r.path:
+            # 结果目录定位（见 CONTEXT.md）：不产生分享链接、不改变分享状态
+            QDesktopServices.openUrl(QUrl(baidu_pan.disk_home_url(r.path)))
 
     def _open_result_path(self, r: SearchResult):
         """【打开路径】：本地打开所在文件夹（并选中文件）；ima 打开 ima 网页到对应知识库。"""
@@ -1115,6 +1245,203 @@ class ImaCredsDialog(QDialog):
 
     def get_credentials(self) -> tuple:
         return (self.edit_cid.text().strip(), self.edit_key.text().strip())
+
+
+class BaiduCredsDialog(QDialog):
+    """百度网盘应用凭证配置对话框。
+
+    应用凭证（client_id / client_secret）需用户在百度网盘开放平台
+    （https://pan.baidu.com/union/）自建应用获取；只标识"哪个应用在请求"，
+    与用户个人数据无关，但不应公开传播。保存位置见 docs/adr/0001。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置 - 百度网盘应用凭证")
+        self.resize(520, 230)
+
+        layout = QVBoxLayout(self)
+
+        form = QVBoxLayout()
+        self.edit_cid = QLineEdit()
+        self.edit_cid.setPlaceholderText("百度开放平台应用的 API Key（client_id）")
+        self.edit_secret = QLineEdit()
+        self.edit_secret.setPlaceholderText("Secret Key（client_secret）")
+        self.edit_secret.setEchoMode(QLineEdit.EchoMode.Password)  # 掩码显示
+        form.addWidget(QLabel("Client ID（API Key）："))
+        form.addWidget(self.edit_cid)
+        form.addWidget(QLabel("Client Secret（Secret Key）："))
+        form.addWidget(self.edit_secret)
+        layout.addLayout(form)
+
+        lbl = QLabel(
+            '在 <a href="https://pan.baidu.com/union/">百度网盘开放平台</a> '
+            "创建应用即可获得上述一对凭证（文件读取/搜索类权限无需审核）。"
+            "凭证仅保存在本机，下一步将引导完成用户授权。"
+        )
+        lbl.setOpenExternalLinks(True)
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+        ok_row = QHBoxLayout()
+        b_ok = QPushButton("确定")
+        b_cancel = QPushButton("取消")
+        ok_row.addStretch(1)
+        ok_row.addWidget(b_ok)
+        ok_row.addWidget(b_cancel)
+        layout.addLayout(ok_row)
+
+        b_ok.clicked.connect(self.accept)
+        b_cancel.clicked.connect(self.reject)
+
+    def get_credentials(self) -> tuple:
+        return (self.edit_cid.text().strip(), self.edit_secret.text().strip())
+
+
+class _DeviceAuthPollThread(QThread):
+    """设备码授权轮询线程：在后台阻塞轮询令牌端点，经信号回报 UI。
+
+    放线程里跑是因为 poll_device_token 内部按 5s 间隔循环请求；
+    stop() 置位后最多再等一个轮询周期即退出。
+    """
+    status = Signal(str)      # 等待进度文本
+    succeeded = Signal(dict)  # 授权成功（令牌字典）
+    failed = Signal(str)      # 授权失败（错误文本）
+
+    def __init__(self, device_code: str, client_id: str, client_secret: str,
+                 interval: float, timeout: float):
+        super().__init__()
+        self._device_code = device_code
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._interval = interval
+        self._timeout = timeout
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            token = baidu_pan.poll_device_token(
+                self._device_code, self._client_id, self._client_secret,
+                interval=self._interval, timeout=self._timeout,
+                on_status=self.status.emit,
+                should_stop=lambda: self._stop,
+            )
+        except baidu_pan.BaiduAuthError as e:
+            if not self._stop:
+                self.failed.emit(e.msg)
+            return
+        if token is not None and not self._stop:
+            self.succeeded.emit(token)
+
+
+class BaiduDeviceAuthDialog(QDialog):
+    """百度网盘设备码授权对话框。
+
+    流程：请求设备码 -> 展示 user_code 与 verification_url（可一键打开）
+    -> 后台线程每 5s 轮询 -> 成功即保存令牌并 Accept；失败/过期/取消
+    均给出明确反馈。设备码有效期一般 300s，过期需重新发起。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("百度网盘授权")
+        self.resize(560, 300)
+        self._thread = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "1. 点「打开授权页面」（或复制下方地址）在浏览器中打开百度授权页；\n"
+            "2. 输入下方用户码并确认登录；\n"
+            "3. 本窗口会自动完成授权（设备码 5 分钟内有效，无需一直守着）。"))
+
+        form = QFormLayout()
+        self.edit_code = QLineEdit()
+        self.edit_code.setReadOnly(True)
+        self.edit_code.setStyleSheet("font-size: 16px; font-weight: bold;")
+        form.addRow("用户码:", self.edit_code)
+        self.lbl_url = QLabel("")
+        self.lbl_url.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.lbl_url.setOpenExternalLinks(True)
+        form.addRow("授权页面:", self.lbl_url)
+        layout.addLayout(form)
+
+        self.btn_open = QPushButton("打开授权页面")
+        self.btn_open.clicked.connect(self._open_url)
+        layout.addWidget(self.btn_open)
+
+        self.status = QLabel("正在获取设备码…")
+        layout.addWidget(self.status)
+
+        btns = QHBoxLayout()
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        btns.addStretch(1)
+        btns.addWidget(self.btn_cancel)
+        layout.addLayout(btns)
+
+        # 请求设备码（失败立即关闭并提示）
+        t = baidu_pan.load_token() or {}
+        cid = t.get("client_id", "")
+        secret = t.get("client_secret", "")
+        if not cid or not secret:
+            QMessageBox.warning(self, "授权失败", "尚未配置应用凭证（client_id / client_secret）")
+            QTimer.singleShot(0, self.reject)
+            return
+        try:
+            info = baidu_pan.request_device_code(cid)
+        except baidu_pan.BaiduAuthError as e:
+            QMessageBox.warning(self, "授权失败", e.msg)
+            QTimer.singleShot(0, self.reject)
+            return
+        self._device_code = info.get("device_code", "")
+        self.edit_code.setText(info.get("user_code", ""))
+        url = info.get("verification_url") or ""
+        self._url = url
+        self.lbl_url.setText(f'<a href="{url}">{url}</a>')
+        self.status.setText("等待授权…（每 5 秒自动检查一次）")
+        self._start_poll(
+            interval=max(5.0, float(info.get("interval") or 5)),
+            timeout=float(info.get("expires_in") or 300),
+            client_id=cid, client_secret=secret,
+        )
+
+    def _start_poll(self, interval: float, timeout: float,
+                    client_id: str, client_secret: str):
+        self._thread = _DeviceAuthPollThread(
+            self._device_code, client_id, client_secret, interval, timeout)
+        self._thread.status.connect(self.status.setText)
+        self._thread.succeeded.connect(self._on_success)
+        self._thread.failed.connect(self._on_fail)
+        self._thread.start()
+
+    def _open_url(self):
+        if self._url:
+            QDesktopServices.openUrl(QUrl(self._url))
+
+    def _on_success(self, token: dict):
+        self.status.setText("授权成功")
+        self.accept()
+
+    def _on_fail(self, msg: str):
+        self.status.setText(msg)
+        QMessageBox.warning(self, "授权失败", msg)
+        self.reject()
+
+    def _on_cancel(self):
+        if self._thread is not None:
+            self._thread.stop()
+        self.reject()
+
+    def closeEvent(self, event):
+        # 关窗同样要停掉轮询线程（最多再等一个 5s 周期即退出）
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.stop()
+            self._thread.wait(6000)
+        super().closeEvent(event)
 
 
 class ConcurrencyDialog(QDialog):
