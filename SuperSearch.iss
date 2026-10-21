@@ -9,13 +9,14 @@
 ;   1) 先构建单文件 exe（已在项目 venv 中安装 PyInstaller 6.x）：
 ;        venv\Scripts\python.exe -m PyInstaller build\SuperSearch.spec
 ;      → 得到 dist\SuperSearch.exe
-;   2) 安装 Inno Setup 6（https://jrsoftware.org/isinfo.php），然后编译本脚本：
-;        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" SuperSearch.iss
+;   2) 安装 Inno Setup 6（https://jrsoftware.org/isinfo.php），然后编译本脚本
+;      （本机 ISCC 位于用户级安装目录）：
+;        "C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe" SuperSearch.iss
 ;      → 得到 dist\SuperSearch-Setup.exe（双击即可安装使用）
 ; ============================================================================
 
 #define MyAppName "SuperSearch"
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.2.2"
 #define MyAppPublisher "Jiahui Zou"
 #define MyAppExeName "SuperSearch.exe"
 #define MyAppIco "assets\SuperSearch.ico"

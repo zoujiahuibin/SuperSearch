@@ -166,7 +166,11 @@ class SearchWorker(QThread):
             # 确保 Everything HTTP 可用；不可达时自动启动内置便携版（等待就绪，最多 30s）
             self.progress.emit("正在检查本地检索服务（Everything）…")
             ev_cfg, ev_note, ev_ok = ev_bundler.ensure_everything_running(
-                self.ev_cfg, wait_seconds=30)
+                self.ev_cfg, wait_seconds=30,
+                # HTTP 就绪后继续等待索引可查询：冷启动重建索引实测约 80s，
+                # 期间 HTTP 虽通但直接检索会静默返回空结果
+                index_wait_seconds=120,
+                progress_cb=self.progress.emit)
             if ev_note:
                 self.progress.emit(ev_note)
             if ev_ok:
@@ -816,6 +820,10 @@ class MainWindow(QMainWindow):
             self.status.showMessage("SuperSearch 已最小化到系统托盘，右键托盘图标可退出")
         else:
             event.accept()
+            # 无托盘环境下关闭窗口即真正退出：退出内置 Everything 实例并
+            # 等待其保存数据库，下次启动可快速冷加载（见 quit_app 注释）。
+            # 此处阻塞 UI 线程数秒无妨——窗口本就要关闭。
+            ev_bundler.quit_our_instance_and_wait_save()
 
 
 def _quit_bundled_everything() -> int:
@@ -840,6 +848,9 @@ def _quit_bundled_everything() -> int:
                 timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            # 等数据库保存落盘后再返回，安装器才会继续删文件，
+            # 避免删到半截 .db / 残留 .db.tmp 导致下次安装后索引异常
+            ev_bundler._wait_db_save_complete()
             return 0
         except Exception:  # noqa: BLE001
             continue
@@ -927,6 +938,11 @@ def quit_app(self):
     self._force_quit = True
     if self._tray_available:
         self.tray.hide()
+    # 退出内置 Everything 实例并等待其保存数据库：实例退出时会写盘 .db
+    # （233MB 约需 2-5s），等落盘完成再退出应用，避免"重启应用时新实例与
+    # 旧实例存盘竞争"导致 HTTP 绑定延迟数十秒；同时让库保持新鲜，下次冷启动
+    # 数秒即可就绪（实测 4.5s，陈旧库则要约 80s 全量重建）。
+    ev_bundler.quit_our_instance_and_wait_save()
     QApplication.quit()
 
 

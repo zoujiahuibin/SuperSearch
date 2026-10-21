@@ -7,6 +7,7 @@
 """
 import os
 import sys
+import time
 import unittest
 import subprocess
 from datetime import datetime, timezone
@@ -729,16 +730,178 @@ class TestEvBundler(unittest.TestCase):
         ini = ev_bundler.write_bundled_ini(8180, base_dir=d)
         self.assertTrue(os.path.isfile(ini))
         content = open(ini, encoding="utf-8").read()
-        self.assertIn("instance=SuperSearch", content)
-        self.assertIn("http_server=1", content)
+        # ini 必须有 [Everything] 节头：节外键不生效
+        self.assertIn("[Everything]", content)
+        # 启用 HTTP 服务器的合法键名是 http_server_enabled；http_server=1 是
+        # 非法键，会被 Everything 静默忽略（v1.2.1 本地检索不可用的根因）
+        self.assertIn("http_server_enabled=1", content)
+        self.assertNotIn("http_server=1", content)
         self.assertIn("http_server_port=8180", content)
-        self.assertIn("db_path=", content)
+        # ini 内实例名键是 instance_name（instance= 为非法键）
+        self.assertIn("instance_name=SuperSearch", content)
+        self.assertNotIn("instance=SuperSearch", content)
         # 后台/标准用户运行：不弹管理员对话框、不触发 UAC、无托盘图标、无窗口
         self.assertIn("run_as_admin=0", content)
         self.assertIn("run_in_background=1", content)
         self.assertIn("show_tray_icon=0", content)
         self.assertIn("auto_include_fixed_volumes=1", content)
         self.assertIn("check_for_updates_on_startup=0", content)
+
+    def test_ensure_everything_running_quits_stale_instance_first(self):
+        # 升级场景：旧版本（错误 ini 键）启动的实例可能仍在运行，其内存配置中
+        # HTTP 服务器是关闭的。必须先退出旧实例再启动——否则新进程只会激活旧
+        # 实例而不会重载配置，HTTP 永远无法就绪。
+        cfg = cfg_mod.EverythingConfig(port=80)
+        calls = {"quit": 0, "launch": 0}
+
+        class FakeProc:
+            def __init__(self, alive):
+                self._alive = alive
+                self.returncode = None
+
+            def poll(self):
+                if self._alive:
+                    return None
+                self.returncode = 0
+                return 0
+
+        def fake_quit(exe_path=None):
+            calls["quit"] += 1
+
+        def fake_launch(port, exe_path=None, base_dir=None):
+            calls["launch"] += 1
+            return FakeProc(alive=True), None
+
+        with mock.patch.object(ev_bundler, "_reachable", return_value=False), \
+                mock.patch.object(ev_bundler, "bundled_everything_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "service_installed", return_value=True), \
+                mock.patch.object(ev_bundler, "_ensure_stable_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "quit_our_instance",
+                                  side_effect=fake_quit), \
+                mock.patch.object(ev_bundler, "launch_bundled",
+                                  side_effect=fake_launch), \
+                mock.patch.object(ev_bundler, "wait_reachable", return_value=True):
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                cfg, wait_seconds=1)
+        self.assertTrue(ok)
+        self.assertEqual(calls["quit"], 1, "启动前必须先退出可能残留的旧实例")
+        self.assertEqual(calls["launch"], 1)
+
+    def test_ensure_everything_running_absorbed_launch_retries(self):
+        # “吸收”竞态：旧实例尚未退完（大数据库落盘需要数秒），首次启动的进程
+        # 被旧实例吸收而立即退出；必须再次 quit + 重启直至新进程稳定存活。
+        cfg = cfg_mod.EverythingConfig(port=80)
+        calls = {"quit": 0, "launch": 0}
+
+        class FakeProc:
+            def __init__(self, alive):
+                self._alive = alive
+                self.returncode = None
+
+            def poll(self):
+                if self._alive:
+                    return None
+                self.returncode = 0
+                return 0
+
+        procs = [FakeProc(alive=False), FakeProc(alive=True)]
+
+        def fake_quit(exe_path=None):
+            calls["quit"] += 1
+
+        def fake_launch(port, exe_path=None, base_dir=None):
+            calls["launch"] += 1
+            return procs[min(calls["launch"] - 1, len(procs) - 1)], None
+
+        with mock.patch.object(ev_bundler, "_reachable", return_value=False), \
+                mock.patch.object(ev_bundler, "bundled_everything_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "service_installed", return_value=True), \
+                mock.patch.object(ev_bundler, "_ensure_stable_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "quit_our_instance",
+                                  side_effect=fake_quit), \
+                mock.patch.object(ev_bundler, "launch_bundled",
+                                  side_effect=fake_launch), \
+                mock.patch.object(ev_bundler, "wait_reachable", return_value=True):
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                cfg, wait_seconds=1)
+        self.assertTrue(ok)
+        self.assertEqual(calls["launch"], 2, "被吸收的启动必须重试")
+        self.assertEqual(calls["quit"], 2, "每次启动前都应先退出旧实例")
+
+    def test_ensure_everything_running_relaunches_when_last_proc_dead(self):
+        # 上次拉起的进程已死亡且 HTTP 不可达（吸收竞态残留的无实例状态）：
+        # 不能按"已启动"空等 wait_seconds，应直接走重新拉起路径。
+        cfg = cfg_mod.EverythingConfig(port=80)
+        launches = []
+
+        class FakeProc:
+            def __init__(self, alive):
+                self._alive = alive
+
+            def poll(self):
+                return None if self._alive else 0
+
+        def fake_launch(port, exe_path=None, base_dir=None):
+            launches.append(port)
+            return FakeProc(alive=True), None
+
+        with mock.patch.object(ev_bundler, "_reachable", return_value=False), \
+                mock.patch.object(ev_bundler, "bundled_everything_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "service_installed", return_value=True), \
+                mock.patch.object(ev_bundler, "_ensure_stable_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "quit_our_instance"), \
+                mock.patch.object(ev_bundler, "launch_bundled",
+                                  side_effect=fake_launch), \
+                mock.patch.object(ev_bundler, "wait_reachable", return_value=True):
+            ev_bundler._launched = True
+            ev_bundler._last_proc = FakeProc(alive=False)
+            try:
+                new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                    cfg, wait_seconds=1)
+            finally:
+                ev_bundler._launched = False
+                ev_bundler._last_proc = None
+        self.assertTrue(ok)
+        self.assertEqual(len(launches), 1,
+                         "进程已死且 HTTP 不可达应触发重新拉起")
+
+    def test_ensure_everything_running_waits_when_last_proc_alive(self):
+        # 进程仍活着（HTTP 尚未就绪的正常启动中）-> 按"已启动"等待，不重启
+        cfg = cfg_mod.EverythingConfig(port=80)
+        launches = []
+
+        class FakeProc:
+            def poll(self):
+                return None
+
+        def fake_launch(port, exe_path=None, base_dir=None):
+            launches.append(port)
+            return FakeProc(), None
+
+        with mock.patch.object(ev_bundler, "_reachable", return_value=False), \
+                mock.patch.object(ev_bundler, "bundled_everything_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "service_installed", return_value=True), \
+                mock.patch.object(ev_bundler, "quit_our_instance"), \
+                mock.patch.object(ev_bundler, "launch_bundled",
+                                  side_effect=fake_launch), \
+                mock.patch.object(ev_bundler, "wait_reachable", return_value=True):
+            ev_bundler._launched = True
+            ev_bundler._last_proc = FakeProc()
+            try:
+                new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                    cfg, wait_seconds=1)
+            finally:
+                ev_bundler._launched = False
+                ev_bundler._last_proc = None
+        self.assertTrue(ok)
+        self.assertEqual(launches, [], "进程仍活着时不应重复拉起")
 
     def test_service_installed_uses_sc_query(self):
         # returncode==0 -> 已安装；非 0 -> 未安装；异常 -> False
@@ -750,6 +913,121 @@ class TestEvBundler(unittest.TestCase):
             self.assertFalse(ev_bundler.service_installed())
         with mock.patch.object(ev_bundler.subprocess, "run", side_effect=OSError("no sc")):
             self.assertFalse(ev_bundler.service_installed())
+
+    def test_index_probe_total_parsing(self):
+        # totalResults 为整数 -> 原样返回；0 -> 0；缺失/非法/异常 -> None
+        cfg = cfg_mod.EverythingConfig(port=80)
+
+        class FakeResp:
+            def __init__(self, data):
+                self._data = data
+
+            def json(self):
+                return self._data
+
+        with mock.patch.object(ev_bundler.requests, "get",
+                               return_value=FakeResp({"totalResults": 123})):
+            self.assertEqual(ev_bundler.index_probe_total(cfg), 123)
+        with mock.patch.object(ev_bundler.requests, "get",
+                               return_value=FakeResp({"totalResults": 0})):
+            self.assertEqual(ev_bundler.index_probe_total(cfg), 0)
+            self.assertFalse(ev_bundler.is_index_ready(cfg))
+        with mock.patch.object(ev_bundler.requests, "get",
+                               return_value=FakeResp({})):
+            self.assertIsNone(ev_bundler.index_probe_total(cfg))
+        with mock.patch.object(ev_bundler.requests, "get",
+                               return_value=FakeResp({"totalResults": "abc"})):
+            self.assertIsNone(ev_bundler.index_probe_total(cfg))
+        with mock.patch.object(ev_bundler.requests, "get",
+                               side_effect=ev_bundler.requests.RequestException):
+            self.assertIsNone(ev_bundler.index_probe_total(cfg))
+            self.assertFalse(ev_bundler.is_index_ready(cfg))
+        # totalResults>0 -> 索引可查询
+        with mock.patch.object(ev_bundler.requests, "get",
+                               return_value=FakeResp({"totalResults": 3475448})):
+            self.assertTrue(ev_bundler.is_index_ready(cfg))
+
+    def test_wait_index_ready_polls_and_reports_progress(self):
+        # 索引未就绪 -> 轮询至超时返回 False；progress_cb 收到进度消息
+        cfg = cfg_mod.EverythingConfig(port=80)
+        msgs = []
+        clock = [1000.0]
+
+        def fake_monotonic():
+            clock[0] += 1.0
+            return clock[0]
+
+        with mock.patch.object(ev_bundler, "is_index_ready",
+                               side_effect=[False] * 20), \
+                mock.patch.object(ev_bundler.time, "sleep", lambda s: None), \
+                mock.patch.object(ev_bundler.time, "monotonic", fake_monotonic):
+            ok = ev_bundler.wait_index_ready(cfg, 3.0, progress_cb=msgs.append)
+        self.assertFalse(ok)
+        self.assertTrue(msgs, "应通过 progress_cb 汇报索引建立进度")
+        self.assertIn("索引", msgs[0])
+
+    def test_wait_index_ready_returns_true_immediately_when_ready(self):
+        cfg = cfg_mod.EverythingConfig(port=80)
+        with mock.patch.object(ev_bundler, "is_index_ready", return_value=True):
+            self.assertTrue(ev_bundler.wait_index_ready(cfg, 5.0))
+
+    def test_ensure_everything_running_waits_index_when_requested(self):
+        # HTTP 已就绪但索引未就绪 -> 返回提示与 ok=False（不能放行静默空检索）
+        cfg = cfg_mod.EverythingConfig(port=80)
+        with mock.patch.object(ev_bundler, "_reachable", return_value=True), \
+                mock.patch.object(ev_bundler, "wait_index_ready",
+                                  return_value=False) as m_wait:
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                cfg, wait_seconds=1, index_wait_seconds=120)
+        self.assertFalse(ok)
+        self.assertEqual(note, ev_bundler.INDEX_BUILDING_NOTE)
+        self.assertEqual(m_wait.call_args[0][1], 120)
+        # 索引就绪 -> 放行
+        with mock.patch.object(ev_bundler, "_reachable", return_value=True), \
+                mock.patch.object(ev_bundler, "wait_index_ready",
+                                  return_value=True):
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                cfg, wait_seconds=1, index_wait_seconds=120)
+        self.assertTrue(ok)
+        self.assertIsNone(note)
+
+    def test_ensure_everything_running_skips_index_wait_by_default(self):
+        # 不传 index_wait_seconds（如启动预热带）-> 不等待索引，保持启动不阻塞
+        cfg = cfg_mod.EverythingConfig(port=80)
+        with mock.patch.object(ev_bundler, "_reachable", return_value=True), \
+                mock.patch.object(ev_bundler, "wait_index_ready") as m_wait:
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                cfg, wait_seconds=1)
+        self.assertTrue(ok)
+        m_wait.assert_not_called()
+
+    def test_ensure_everything_running_index_wait_after_fresh_launch(self):
+        # 全新启动路径：HTTP 就绪后同样要等索引就绪，未就绪则给出建立中提示
+        cfg = cfg_mod.EverythingConfig(port=80)
+
+        class FakeProc:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        with mock.patch.object(ev_bundler, "_reachable", return_value=False), \
+                mock.patch.object(ev_bundler, "bundled_everything_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "service_installed", return_value=True), \
+                mock.patch.object(ev_bundler, "_ensure_stable_exe",
+                                  return_value="X:/everything.exe"), \
+                mock.patch.object(ev_bundler, "quit_our_instance"), \
+                mock.patch.object(ev_bundler, "launch_bundled",
+                                  return_value=(FakeProc(), None)), \
+                mock.patch.object(ev_bundler, "wait_reachable", return_value=True), \
+                mock.patch.object(ev_bundler, "wait_index_ready",
+                                  return_value=False):
+            new_cfg, note, ok = ev_bundler.ensure_everything_running(
+                cfg, wait_seconds=1, index_wait_seconds=120)
+        self.assertFalse(ok)
+        self.assertEqual(note, ev_bundler.INDEX_BUILDING_NOTE)
+        self.assertEqual(new_cfg.port, 80)
 
     def test_install_service_uses_stable_exe(self):
         # 安装服务必须从持久化稳定目录执行（_MEIPASS 会被清理），并调用 -install-service
@@ -831,6 +1109,78 @@ class TestEvBundler(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsNotNone(note)
         self.assertIn("本地检索不可用", note)
+
+    def test_quit_and_wait_save_waits_for_tmp_lifecycle(self):
+        # .tmp 先出现、后消失 -> 观察到一次完整保存，返回 True 且 quit 被调用一次
+        calls = {"quit": 0, "exists": 0}
+
+        def fake_exists(p):
+            calls["exists"] += 1
+            if p.endswith(".db.tmp"):
+                # 前 3 次探测模拟 -quit 到开始写盘的延迟；第 4-5 次写盘中；
+                # 第 6 次起已保存完成
+                return 4 <= calls["exists"] <= 5
+            return False
+
+        def fake_quit(exe_path=None):
+            calls["quit"] += 1
+
+        with mock.patch.object(ev_bundler, "quit_our_instance", side_effect=fake_quit), \
+                mock.patch.object(ev_bundler.os.path, "exists", side_effect=fake_exists), \
+                mock.patch.object(ev_bundler.os.path, "getmtime",
+                                  return_value=time.time()), \
+                mock.patch.object(ev_bundler.time, "sleep", lambda s: None):
+            ok = ev_bundler.quit_our_instance_and_wait_save(timeout=5.0)
+        self.assertTrue(ok)
+        self.assertEqual(calls["quit"], 1)
+
+    def test_quit_and_wait_save_returns_fast_when_no_instance(self):
+        # 没有实例在运行：.tmp 始终不出现 -> 约 1s 内返回 False，不卡退出
+        seen_exe = []
+
+        def fake_quit(exe_path=None):
+            seen_exe.append(exe_path)
+
+        clock = [1000.0]
+
+        def fake_monotonic():
+            clock[0] += 0.4
+            return clock[0]
+
+        with mock.patch.object(ev_bundler, "quit_our_instance", side_effect=fake_quit), \
+                mock.patch.object(ev_bundler.os.path, "exists", return_value=False), \
+                mock.patch.object(ev_bundler.time, "sleep", lambda s: None), \
+                mock.patch.object(ev_bundler.time, "monotonic", fake_monotonic):
+            ok = ev_bundler.quit_our_instance_and_wait_save("X:/everything.exe", timeout=1.0)
+        self.assertFalse(ok)
+        self.assertEqual(seen_exe, ["X:/everything.exe"])
+
+    def test_quit_and_wait_save_ignores_orphan_tmp(self):
+        # 异常残留的孤儿 .tmp（mtime 超过 20s）-> 立即放弃等待返回 False，
+        # 不会把退出流程卡满 timeout
+        with mock.patch.object(ev_bundler, "quit_our_instance"), \
+                mock.patch.object(ev_bundler.os.path, "exists", return_value=True), \
+                mock.patch.object(ev_bundler.os.path, "getmtime", return_value=0.0), \
+                mock.patch.object(ev_bundler.time, "sleep", lambda s: None):
+            ok = ev_bundler.quit_our_instance_and_wait_save(timeout=10.0)
+        self.assertFalse(ok)
+
+    def test_wait_db_save_complete_shared_helper(self):
+        # _wait_db_save_complete 与 quit_our_instance_and_wait_save 行为一致：
+        # 卸载钩子复用同一等待逻辑（.tmp 出现后消失 -> True）
+        state = {"n": 0}
+
+        def fake_exists(p):
+            state["n"] += 1
+            # 第 2 次起 .tmp 出现（保存开始），第 4 次起消失（保存完成）
+            return 2 <= state["n"] <= 3
+
+        with mock.patch.object(ev_bundler.os.path, "exists", side_effect=fake_exists), \
+                mock.patch.object(ev_bundler.os.path, "getmtime",
+                                  return_value=time.time()), \
+                mock.patch.object(ev_bundler.time, "sleep", lambda s: None):
+            ok = ev_bundler._wait_db_save_complete(timeout=5.0)
+        self.assertTrue(ok)
 
 
 class TestTray(unittest.TestCase):

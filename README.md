@@ -2,7 +2,7 @@
 
 一个独立的桌面 GUI（PySide6），同时检索：
 
-- **本地文件**：通过 Everything HTTP Server。v1.2.0 起**内置 Everything 便携版**（随 exe 打包，首次运行自动拉起），无需单独安装 Everything。v1.2.1 起安装器会装好 **Everything 服务**，内置实例改为**后台无界面**运行——不再弹“需要管理员权限索引 NTFS”对话框，也不再显示 Everything 窗口/托盘图标。
+- **本地文件**：通过 Everything HTTP Server。v1.2.0 起**内置 Everything 便携版**（随 exe 打包，首次运行自动拉起），无需单独安装 Everything。v1.2.1 起安装器会装好 **Everything 服务**，内置实例改为**后台无界面**运行——不再弹“需要管理员权限索引 NTFS”对话框，也不再显示 Everything 窗口/托盘图标。v1.2.2 修正了 HTTP 服务器的启用方式（ini 键名），并新增索引就绪等待与应用退出时的数据库保存。
 - **ima 知识库文档/笔记**：通过 ima 官方 OpenAPI。
 
 结果合并在同一张列表里，用**来源标签**区分（蓝色=本地，绿色=ima），支持按来源筛选、双击打开本地文件、查看 ima 高亮摘要。
@@ -28,7 +28,7 @@
 | 操作系统 | **Windows**（推荐） | 本地检索依赖 Everything HTTP Server；文件图标走 Windows shell 图标，故与 Everything / 资源管理器一致。ima 检索跨平台可用，但未在 macOS/Linux 验证。 |
 | Python | **3.9+**（开发用 3.10） | 需能安装 PySide6 6.x。 |
 | 依赖 | `PySide6>=6.5`、`requests>=2.28` | 见 `requirements.txt`，用 `pip install -r requirements.txt` 安装。 |
-| Everything | 1.4+（已内置） | 仅本地检索需要。v1.2.0 起程序已内置 Everything 便携版并自动拉起其 HTTP Server（默认 `127.0.0.1:80`，被占用则退 8180）；若本机已装并启用了 Everything HTTP 服务，则直接复用，不再重复拉起。v1.2.1 起安装器安装 Everything 服务（需管理员），内置实例以 `-startup` 后台运行、无窗口、无托盘图标。 |
+| Everything | 1.4+（已内置） | 仅本地检索需要。v1.2.0 起程序已内置 Everything 便携版并自动拉起其 HTTP Server（默认 `127.0.0.1:80`，被占用则退 8180）；若本机已装并启用了 Everything HTTP 服务，则直接复用，不再重复拉起。v1.2.1 起安装器安装 Everything 服务（需管理员），内置实例以 `-startup` 后台运行、无窗口、无托盘图标。v1.2.2 修正 ini 键名为合法的 `http_server_enabled=1`，检索时等待索引就绪（冷启动重建约 80s，期间提示"正在建立本地文件索引"），应用退出时保存数据库使下次启动数秒内可用。 |
 | 网络 | 需能访问 `ima.qq.com` | 仅 ima 检索需要；本地检索纯内网。 |
 | ima 凭证 | Client ID / API Key | 仅 ima 检索需要，在 [ima 开放平台](https://ima.qq.com/agent-interface) 申请。 |
 
@@ -121,7 +121,7 @@ venv/Scripts/python.exe main.py
 ### 运行测试
 
 ```bash
-venv/Scripts/python.exe tests/smoke_test.py   # 54 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑）
+venv/Scripts/python.exe tests/smoke_test.py   # 68 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑 + 索引就绪等待 + 退出等待落盘）
 # 可选：无界面验证 GUI 可构造
 QT_QPA_PLATFORM=offscreen venv/Scripts/python.exe tests/verify_gui.py
 ```
@@ -189,11 +189,24 @@ ini 写入 `run_as_admin=0` / `run_in_background=1` / `show_tray_icon=0` / `auto
 后台运行、无界面），卸载时经 `--uninstall-everything-service` 移除；服务缺失时应用也会尝试补装一次
 （标准用户触发一次性 UAC）。`core/ev_bundler.py` 相应新增 `service_installed/install_service/uninstall_service`。
 
+**v1.2.2 修复 HTTP 服务器启用 + 索引就绪等待**：修正 ini 键名（`http_server=1` → 合法的
+`http_server_enabled=1`，并补上 `[Everything]` 节头——v1.2.1 升级用户本地检索不可用的根因）；
+启动旧实例（内存中 HTTP 关闭）时先退出再启动，防"激活旧实例不重载配置"与退出存盘期间的
+"吸收"竞态（最多 5 次重试）。检索时新增**索引就绪等待**：HTTP 就绪 ≠ 索引就绪（冷启动重建
+索引实测约 80s，期间直接检索会静默返回空结果），故就绪后继续等待 `totalResults>0`（最多 120s，
+状态栏显示进度），未就绪则提示"正在建立本地文件索引"而非返回空结果。应用退出时退出内置实例，
+使其保存数据库——下次冷启动仅需数秒（实测新鲜库索引 4.5s 就绪 vs 陈旧库约 80s 全量重建）；
+且退出/卸载前会等待 `.db.tmp` 落盘完成（出现后消失，孤儿 `.tmp` 不阻塞），避免存盘竞态拖慢
+下次 HTTP 绑定、也避免卸载时删到半截数据库。
+
 **v1.2.0 起内置 Everything 便携版**：`vendor/Everything/`（官方 zip，未改动）随包打进
 `dist/SuperSearch.exe`，运行 / 检索时由 `core/ev_bundler.py` 自动探测并拉起内置 Everything
-（独立实例名 `SuperSearch`，其配置写入 `http_server=1` 即**自动开启 HTTP 服务**，端口优先 80、
-被占用则退 8180），无需用户在目标机单独安装 Everything 即可使用本地检索。ima 检索仅需网络 +
-已配置凭证。
+（独立实例名 `SuperSearch`，其配置写入 `http_server_enabled=1` 即**自动开启 HTTP 服务**，
+端口优先 80、被占用则退 8180），无需用户在目标机单独安装 Everything 即可使用本地检索。
+ima 检索仅需网络 + 已配置凭证。
+> 注：v1.2.0/v1.2.1 曾把该键误写为 `http_server=1`（非法键，被 Everything 静默忽略，
+> 导致 HTTP 服务器从未真正启用），且 ini 缺少 `[Everything]` 节头；v1.2.2 已按官方
+> INI 文档修正为 `http_server_enabled=1` + `[Everything]` 节头。
 
 **开箱即用 / 隐私默认**：首次安装后 ima 凭证为空（程序不内置任何 Client ID / API Key，凭证
 仅写入用户本机 `~/.config/ima`）；设置文件改存用户可写的 `%APPDATA%\SuperSearch\settings.json`
@@ -213,7 +226,7 @@ venv/Scripts/python.exe -m PyInstaller --noconfirm --clean build/SuperSearch.spe
 #  → dist/SuperSearch.exe（已带应用图标、版本信息、内嵌 Everything）
 ```
 > 说明：`build/SuperSearch.spec` 已固定图标（`assets/SuperSearch.ico`）、版本文件
-> （`version_info.txt`，现为 1.2.1）、并把 `vendor/Everything` 作为 data 文件打进包内；
+> （`version_info.txt`，现为 1.2.2）、并把 `vendor/Everything` 作为 data 文件打进包内；
 > 不需要手动加 `--add-data` 或 `--icon`。PyInstaller 的 PySide6 钩子会自动带上 Qt 平台插件。
 
 ### 生成"可安装"的 setup.exe
