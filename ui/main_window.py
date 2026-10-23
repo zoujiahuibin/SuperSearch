@@ -230,6 +230,7 @@ class MainWindow(QMainWindow):
         self._cols_initialized = False  # 列宽是否已完成首次按内容自适应
         self.icon_provider = QFileIconProvider()  # 系统 shell 图标（与资源管理器/Everything 同源）
         self._kb_numeric_cache: dict = {}  # ima kb_id(base64) -> 数字 knowledgeBaseId 缓存
+        self._kb_numeric_failed: set = set()  # 已知解析不出数字 ID 的 kb_id（负面缓存）
         self._ima_client_cache = None  # ima 电脑端是否可用（None=未探测）
         self._ext_icon_cache: dict = {}  # 扩展名 -> 系统图标缓存（ima 结果按类型显示）
         self._init_ui()
@@ -736,10 +737,17 @@ class MainWindow(QMainWindow):
             self.status.showMessage("未能获取知识库数字 ID，已打开 ima 网页")
 
     def _resolve_kb_numeric(self, kb_id: str):
-        """解析并缓存 kb_id(base64) -> 数字 knowledgeBaseId；失败返回 None。"""
+        """解析并缓存 kb_id(base64) -> 数字 knowledgeBaseId；失败返回 None。
+
+        负面缓存：已知解析不出数字 ID 的 kb_id 记入 _kb_numeric_failed，
+        避免每次打开都白跑一次 get_knowledge_list 请求（OpenAPI 当前不暴露
+        数字 ID，见 ima_search.get_kb_numeric_id 的背景说明）。
+        """
         numeric = self._kb_numeric_cache.get(kb_id)
         if numeric:
             return numeric
+        if kb_id in self._kb_numeric_failed:
+            return None
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             numeric = ima_search.get_kb_numeric_id(self.ima_cfg, kb_id)
@@ -749,6 +757,8 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         if numeric:
             self._kb_numeric_cache[kb_id] = numeric
+        else:
+            self._kb_numeric_failed.add(kb_id)
         return numeric
 
     def _on_table_context_menu(self, pos):
@@ -777,6 +787,11 @@ class MainWindow(QMainWindow):
         （数字 ID 由 get_kb_numeric_id 解析）。action=autoOpenMedia 是客户端“知识库页”
         真正打开文档的开关；未装电脑端则回退：用 get_media_info 的 COS 直链在默认浏览器
         打开（PDF/图片预览，Office 下载）。失败回退 ima 网页。
+
+        2026-10-23 修正：OpenAPI 不暴露数字 knowledgeBaseId（其 ID 空间只有 base64 的
+        ima_kb_XXX），get_kb_numeric_id 增加纯数字校验后对现有账号恒返回 None，
+        因此正常情况下走 COS 直链回退（实测可用）；深链路径保留，待 OpenAPI 暴露
+        数字 ID 时自动恢复。
         """
         if not self.ima_cfg.has_credentials or not r.ref_id:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))

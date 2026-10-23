@@ -134,13 +134,17 @@ def get_media_url(cfg: ImaConfig, media_id: str) -> Optional[str]:
 
 
 def get_kb_numeric_id(cfg: ImaConfig, kb_id: str) -> Optional[str]:
-    """获取知识库在网页端使用的数字 knowledgeBaseId（雪花 ID）。
+    """尝试获取知识库的数字型 knowledgeBaseId（雪花 ID）；拿不到返回 None。
 
-    OpenAPI 只暴露 base64 形态的 kb_id，而网页地址
-    https://ima.qq.com/wikis?knowledgeBaseId=<数字ID> 需要数字型 ID，二者无法互相换算。
-    经实测：get_knowledge_list 根目录返回的 current_path[0].folder_id 即该数字 ID
-    （根目录的 folder_id == knowledge_base_id）；取不到时回退用根目录条目的
-    parent_folder_id。失败返回 None。
+    背景（2026-10-23 实测修正，勿再回退旧逻辑）：ima 客户端/网页端的深链要求
+    数字型 knowledgeBaseId（如 7516872677265288），而 OpenAPI 的知识库 ID 空间
+    只有 base64 形态的 ima_kb_XXX——search_knowledge_base / get_knowledge_base
+    （{"ids": [...]}）/ get_knowledge_list 三个接口均不暴露数字 ID。旧实现直接把
+    current_path[0].folder_id 当数字 ID 返回，实测该值就是 ima_kb_XXX 本身；
+    拼进深链后客户端报"参数错误"（根因是 ID 空间不同，非格式问题）。
+    因此本函数增加纯数字校验：候选中确为数字才返回，否则 None（调用方应走
+    浏览器直链回退，见 ui/main_window._open_ima）。将来若 OpenAPI 暴露数字 ID，
+    本函数自动恢复可用，无需改动调用方。
     """
     if not kb_id:
         return None
@@ -151,13 +155,17 @@ def get_kb_numeric_id(cfg: ImaConfig, kb_id: str) -> Optional[str]:
         )
     except ImaApiError:
         return None
+    candidates = []
     cp = data.get("current_path") or []
     if cp and cp[0].get("folder_id"):
-        return cp[0]["folder_id"]
+        candidates.append(cp[0]["folder_id"])
     for it in data.get("knowledge_list", []):
         pf = it.get("parent_folder_id")
         if pf:
-            return pf
+            candidates.append(pf)
+    for c in candidates:
+        if str(c).isdigit():
+            return str(c)
     return None
 
 
@@ -172,9 +180,11 @@ def ima_client_kb_url(numeric_kb_id: str) -> str:
 
     复刻客户端内置前端 TQ 桥：
         imacopilot://open?url=chrome-extension://<KB扩展>/index.html?knowledgeBaseId=<数字ID>
-    numeric_kb_id 为数字型 knowledgeBaseId（由 get_kb_numeric_id 解析）。
-    REA 客户端本地缓存确认：客户端内部用数字 knowledgeBaseId（如 7451978007345957），
-    与网页 ima.qq.com/wikis?knowledgeBaseId=<数字> 一致，而非 OpenAPI 的 base64 kb_id。
+    numeric_kb_id 为数字型 knowledgeBaseId。REA 客户端本地缓存确认：客户端内部用
+    数字 knowledgeBaseId（如 7516872677265288），与网页 ima.qq.com/wikis?
+    knowledgeBaseId=<数字> 一致，而非 OpenAPI 的 base64 kb_id。
+    ⚠ 调用方必须确保持有纯数字 ID：OpenAPI 不提供该 ID（见 get_kb_numeric_id），
+    传入 ima_kb_XXX 会被客户端以"参数错误"拒绝。
     """
     return (
         f"imacopilot://open?url="
@@ -198,6 +208,8 @@ def ima_client_doc_url(numeric_kb_id: str, media_id: str) -> str:
     注意：不能走 knowledgeDetail 协议——它不会注入 action=autoOpenMedia，
     页面只会定位到知识库而停留在“未打开文档”状态（即此前实测失败的根因）。
     numeric_kb_id 为数字型 knowledgeBaseId；media_id 为文档的 media_id（search 结果里的 ref_id）。
+    ⚠ 调用方必须确保持有纯数字 knowledgeBaseId：OpenAPI 不提供该 ID
+    （见 get_kb_numeric_id），传入 ima_kb_XXX 会被客户端以"参数错误"拒绝。
     """
     return (
         f"imacopilot://open?url="

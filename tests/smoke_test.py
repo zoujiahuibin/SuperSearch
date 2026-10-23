@@ -679,6 +679,44 @@ class TestImaSearch(unittest.TestCase):
             nid = ima_search.get_kb_numeric_id(self._cfg(), "b64kb")
         self.assertEqual(nid, "123")
 
+    def test_get_kb_numeric_id_rejects_non_numeric(self):
+        # 实测根因（2026-10-23）：OpenAPI 的 current_path[0].folder_id 就是
+        # base64 kb_id（ima_kb_XXX），并非数字雪花 ID。旧实现将其当数字 ID
+        # 拼进客户端深链，被以"参数错误"拒绝；故必须校验纯数字，判负走回退。
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 0, "msg": "ok", "data": {
+                "current_path": [{"folder_id": "ima_kb_XcsyzHBL",
+                                  "name": "subsampling"}],
+                "knowledge_list": [
+                    {"media_id": "folder_7516872677265288",
+                     "parent_folder_id": "ima_kb_XcsyzHBL"}],
+                "is_end": True, "next_cursor": ""}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.get_kb_numeric_id(self._cfg(), "ima_kb_XcsyzHBL")
+        self.assertIsNone(nid)
+
+    def test_get_kb_numeric_id_skips_non_numeric_to_numeric_fallback(self):
+        # current_path 非数字、回退条目 parent_folder_id 为数字时，应命中数字 ID
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 0, "msg": "ok", "data": {
+                "current_path": [{"folder_id": "ima_kb_ABC", "name": "x"}],
+                "knowledge_list": [
+                    {"media_id": "m", "parent_folder_id": "7451978007345957"}],
+                "is_end": True, "next_cursor": ""}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.get_kb_numeric_id(self._cfg(), "b64kb")
+        self.assertEqual(nid, "7451978007345957")
+
     def test_get_kb_numeric_id_error_returns_none(self):
         def fake_post(url, json=None, headers=None, timeout=None):
             f = mock.Mock()
