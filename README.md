@@ -189,6 +189,8 @@ ini 写入 `run_as_admin=0` / `run_in_background=1` / `show_tray_icon=0` / `auto
 后台运行、无界面），卸载时经 `--uninstall-everything-service` 移除；服务缺失时应用也会尝试补装一次
 （标准用户触发一次性 UAC）。`core/ev_bundler.py` 相应新增 `service_installed/install_service/uninstall_service`。
 
+**v1.2.3 修复 ima 文档打开（“参数错误”）**：ima 电脑端「打开文档」深链要求数字雪花型 `knowledgeBaseId`，旧实现误将 base64 形态的 `ima_kb_XXX` 传入，客户端报“参数错误”。实测发现数字 ID 一直藏在文档 `media_id` 的尾部（`pdf_<md5>_<md5><数字kb_id>`，同库一致、跨库互异，与客户端自身构造的深链完全同构）：双击文档/「打开路径」现优先在 ima 客户端内精准打开，解析失败时逐级回退（COS 预签名直链 → ima 网页）。
+
 **v1.2.2 修复 HTTP 服务器启用 + 索引就绪等待**：修正 ini 键名（`http_server=1` → 合法的
 `http_server_enabled=1`，并补上 `[Everything]` 节头——v1.2.1 升级用户本地检索不可用的根因）；
 启动旧实例（内存中 HTTP 关闭）时先退出再启动，防"激活旧实例不重载配置"与退出存盘期间的
@@ -226,7 +228,7 @@ venv/Scripts/python.exe -m PyInstaller --noconfirm --clean build/SuperSearch.spe
 #  → dist/SuperSearch.exe（已带应用图标、版本信息、内嵌 Everything）
 ```
 > 说明：`build/SuperSearch.spec` 已固定图标（`assets/SuperSearch.ico`）、版本文件
-> （`version_info.txt`，现为 1.2.2）、并把 `vendor/Everything` 作为 data 文件打进包内；
+> （`version_info.txt`，现为 1.2.3）、并把 `vendor/Everything` 作为 data 文件打进包内；
 > 不需要手动加 `--add-data` 或 `--icon`。PyInstaller 的 PySide6 钩子会自动带上 Qt 平台插件。
 
 ### 生成"可安装"的 setup.exe
