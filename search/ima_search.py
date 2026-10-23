@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -166,6 +167,49 @@ def get_kb_numeric_id(cfg: ImaConfig, kb_id: str) -> Optional[str]:
     for c in candidates:
         if str(c).isdigit():
             return str(c)
+    return None
+
+
+# media_id 结构：<类型>_<md5_1>_<md5_2><数字kb_id>
+# （2026-10-23 实测确认：尾部数字即该库的数字型 knowledgeBaseId——与客户端
+# 深链 URL 的 knowledgeBaseId 完全一致；同库所有文档共享同一后缀，跨库不同。
+# 证据：客户端会话文件中成功打开的 URL，其 knowledgeBaseId 与 mediaId 后缀
+# 相同；另对多个库交叉验证：库内一致、库间互异。）
+_MEDIA_ID_KB_NUMERIC = re.compile(r"^[a-z]+_[0-9a-f]{32}_[0-9a-f]{32}(\d{10,})$")
+
+
+def numeric_kb_id_from_media_id(media_id: str) -> Optional[str]:
+    """从文档 media_id 中提取其所属知识库的数字型 knowledgeBaseId。
+
+    形如 pdf_<md5>_<md5>7488184510344833 的 media_id，尾部数字即数字 kb_id
+    （客户端深链所需形态）。folder_<数字> 等不含两段 md5 的形态、以及结构不
+    完整的 ID 一律返回 None（调用方应走其它解析路径或回退）。
+    """
+    if not media_id:
+        return None
+    m = _MEDIA_ID_KB_NUMERIC.match(media_id.strip())
+    return m.group(1) if m else None
+
+
+def kb_numeric_id_from_contents(cfg: ImaConfig, kb_id: str,
+                                limit: int = 50) -> Optional[str]:
+    """列库内容，取任一条文档 media_id 提取数字 kb_id（知识库级打开用）。
+
+    文档打开可从结果自带的 media_id 零成本提取；但「打开知识库」只有 base64
+    kb_id，需列一次库内容（limit 50，取到首个可解析的文档即返回）。
+    库内只有文件夹或空库时返回 None。失败（API 错误）同样返回 None。
+    """
+    if not kb_id:
+        return None
+    try:
+        data = _post(cfg, "get_knowledge_list",
+                     {"knowledge_base_id": kb_id, "cursor": "", "limit": limit})
+    except ImaApiError:
+        return None
+    for it in data.get("knowledge_list", []):
+        nid = numeric_kb_id_from_media_id(it.get("media_id") or "")
+        if nid:
+            return nid
     return None
 
 

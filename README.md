@@ -103,11 +103,11 @@ venv/Scripts/python.exe main.py
 3. **选择来源**：用「本地」「ima 知识库」两个勾选框控制是否检索对应来源。勾选「本地」后，下方出现**盘符**勾选区（C盘 / D盘 / E盘…，自动探测本机已挂载盘符），默认全选即检索全部盘符；取消某些盘符（如只勾 C盘、E盘）即只在这几个盘符内检索本地文件。盘符过滤通过 Everything 的 `path:` 语法实现（多盘符用 OR 组合）。
 4. **排序**：「排序」下拉框切换 名称/路径/大小/修改时间 × 升/降，与 Everything GUI 排序列一致（服务端排序，名称是自然序）。
 5. **筛选**：结果区下方「筛选」下拉可只看 全部 / 本地 / ima。
-6. **打开**：**双击**本地结果会用系统默认程序打开（文件则打开文件、否则打开所在文件夹）；**双击 ima 结果**会取其真实直链（`get_media_info` 返回的 COS 预签名链接）用默认浏览器打开——PDF / 图片直接预览，Office 等下载到本地；取不到直链时回退打开 ima 网页。也可在任一行上**右键**，选：
+6. **打开**：**双击**本地结果会用系统默认程序打开（文件则打开文件、否则打开所在文件夹）；**双击 ima 结果****优先在 ima 电脑端客户端内打开该篇文档**（深链精准定位；未安装客户端、或数字 ID 解析失败时，回退为取其 COS 预签名直链用默认浏览器打开——PDF / 图片直接预览，Office 等下载到本地）。也可在任一行上**右键**，选：
    - **打开**：与双击效果相同；
-   - **打开路径**：本地结果打开其**所在文件夹**（即“路径”列所示的目录；文件夹结果则打开该文件夹本身）；ima 结果回退为打开 ima 网页（客户端「打开知识库」深链暂不可用，原因见下方说明）。
+   - **打开路径**：本地结果打开其**所在文件夹**（即“路径”列所示的目录；文件夹结果则打开该文件夹本身）；ima 结果**在 ima 客户端打开对应知识库**（未装客户端则打开 ima 网页）。
 
-> **ima 电脑端深链现状（2026-10-23 实测）**：客户端（2.6.13）扩展代码中「打开文档」机制仍然存在——安装 ima.copilot 后注册的 `imacopilot://open?url=chrome-extension://nkohmbngmopdajidckglcoehlaeepeoi/index.html?action=autoOpenMedia&knowledgeBaseId=<数字ID>&mediaId=<媒体ID>` 桥会在 `action===autoOpenMedia` 且 `knowledgeBaseId`、`mediaId` 同时存在时打开该篇文档（网页端“在电脑端打开”即此格式）。但其 `knowledgeBaseId` 必须是**数字雪花 ID**（如 7516872677265288），而 OpenAPI 全链路（`search_knowledge_base` / `get_knowledge_base` / `get_knowledge_list`）只提供 base64 形态的 `ima_kb_XXX`，**无法获得数字 ID**（旧实现误把根目录 `folder_id` 当数字 ID，实测其值就是 `ima_kb_XXX`，客户端报“参数错误”）。因此当前版本对 ima 文档/知识库统一走浏览器直链/网页回退；`get_kb_numeric_id` 已增加纯数字校验，将来 OpenAPI 暴露数字 ID 时深链自动恢复，无需改动调用方。
+> **ima 电脑端深链机制（2026-10-23 实证修复）**：安装 ima.copilot 后注册的 `imacopilot://` 协议承载文档打开深链：`imacopilot://open?url=chrome-extension://nkohmbngmopdajidckglcoehlaeepeoi/index.html?action=autoOpenMedia&knowledgeBaseId=<数字ID>&mediaId=<媒体ID>`。客户端「知识库页」仅在 `action===autoOpenMedia` 且 `knowledgeBaseId`、`mediaId` 同时存在时才打开该篇文档。**关键发现**：其中的数字型 `knowledgeBaseId` 无需额外接口——它就藏在每条文档 `media_id` 的尾部（`pdf_<md5>_<md5><数字kb_id>`；实测同库所有文档共享该后缀、跨库互异，且与客户端自身构造的深链完全同构，据客户端会话文件核实）。因此双击文档时直接从该条结果的 `media_id` 提取（零额外请求）；「打开路径」则列一次库内容提取（按库缓存）。解析失败（如文件夹条目）时逐级回退：根目录 `folder_id`（当前返回 base64 会判负，保留）→ COS 直链 → ima 网页。此前版本误把 base64 `ima_kb_XXX` 当数字 ID 传入导致客户端报“参数错误”，现已修复。
 7. **查看详情**：单击任一行，底部显示路径 / 大小 / 时间，或 ima 高亮摘要。
 8. **设置**（菜单栏「设置」）：
    - **文件格式排序…**：自定义扩展名优先级，让结果按你设定的格式顺序排列。
@@ -121,7 +121,7 @@ venv/Scripts/python.exe main.py
 ### 运行测试
 
 ```bash
-venv/Scripts/python.exe tests/smoke_test.py   # 68 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑 + 索引就绪等待 + 退出等待落盘）
+venv/Scripts/python.exe tests/smoke_test.py   # 75 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑 + 索引就绪等待 + 退出等待落盘 + ima 深链数字 ID 提取）
 # 可选：无界面验证 GUI 可构造
 QT_QPA_PLATFORM=offscreen venv/Scripts/python.exe tests/verify_gui.py
 ```
@@ -306,4 +306,4 @@ venv/Scripts/python.exe -m PyInstaller --noconfirm --clean build/SuperSearch.spe
 | ima 检索部分知识库提示 `请求频率超限 (code 200001)` | ima 为账户级限流。工具已对限流做指数退避重试（最多 4 次，0.5/1/2/4 秒）并在库间限速 0.15 秒；绝大多数情况下重试后即可成功。若极偶发仍有个别库失败，稍后重试即可。 |
 | ima 检索部分知识库提示 `资料获取次数已达上限，请明天再尝试` | 这是 ima 的**每日调取次数配额**（与 `200001` 限流不同，是日级上限），并非代码 bug，也无法靠重试绕过——重试反而更费额度。账号当天检索次数已用尽。**解决**：缩小检索范围（设置 `IMA_KB_IDS` 只检常用库，而非每次都跨全部几十个库），或等次日额度重置。 |
 | 本地结果排序与 Everything 不一致 | Everything 默认按「名称升序」；若你的 Everything GUI 改过排序列/方向，请在界面「排序」下拉框选对应的 名称/路径/大小/修改时间 × 升/降。排序由 Everything 服务端完成（名称是自然序，file2 在 file10 前），与 Everything 本身保持一致。 |
-| 双击 ima 文档，ima 客户端弹出但显示“参数错误” | 2026-10-23 已修复：根因是客户端深链要求**数字型** knowledgeBaseId，而 OpenAPI 只能提供 base64 的 `ima_kb_XXX`（旧实现误将后者当数字 ID 传入）。现版本会自动校验并改走 COS 直链（默认浏览器打开/下载），不再发送必然失败的深链。若你看到此现象，说明跑的是修复前的构建。 |
+| 双击 ima 文档，ima 客户端弹出但显示“参数错误” | 2026-10-23 已修复：根因是深链的 `knowledgeBaseId` 需要数字雪花 ID，旧实现误传 base64 `ima_kb_XXX`。现版本从文档 `media_id` 尾部提取数字 ID（实测与客户端自身格式同构），双击即在客户端内打开；仅当安装的是修复前的构建才会出现此现象。 |

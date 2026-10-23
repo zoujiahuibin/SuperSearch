@@ -747,6 +747,73 @@ class TestImaSearch(unittest.TestCase):
             "?action=autoOpenMedia&knowledgeBaseId=7451978007345957"
             "&mediaId=pdf_abc_123")
 
+    def test_numeric_kb_id_from_media_id_valid(self):
+        # media_id = pdf_<md5>_<md5><数字kb_id>；尾部数字即数字 kb_id
+        # （2026-10-23 实测：与客户端深链 URL 的 knowledgeBaseId 同构）
+        mid = ("pdf_a19e0a0cd6428318a699b99f60bd3020_"
+               "16144d379ce6b276aedc7c83df65679a7490726380183427")
+        self.assertEqual(
+            ima_search.numeric_kb_id_from_media_id(mid), "7490726380183427")
+
+    def test_numeric_kb_id_from_media_id_rejects_other_shapes(self):
+        # 文件夹 ID（无两段 md5）、缺段、数字过短、空值都应判负
+        self.assertIsNone(ima_search.numeric_kb_id_from_media_id(
+            "folder_7516872677265288"))
+        self.assertIsNone(ima_search.numeric_kb_id_from_media_id(
+            "pdf_a19e0a0cd6428318a699b99f60bd3020_short"))
+        self.assertIsNone(ima_search.numeric_kb_id_from_media_id(
+            "pdf_a19e0a0cd6428318a699b99f60bd3020_"
+            "16144d379ce6b276aedc7c83df65679a123"))  # 仅 3 位数字
+        self.assertIsNone(ima_search.numeric_kb_id_from_media_id(""))
+        self.assertIsNone(ima_search.numeric_kb_id_from_media_id(None))
+
+    def test_kb_numeric_id_from_contents(self):
+        # 列库内容：首个可解析的文档 media_id 提供数字 kb_id
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 0, "msg": "ok", "data": {
+                "knowledge_list": [
+                    {"media_id": "folder_7516872677265288", "title": "临时"},
+                    {"media_id": "pdf_a19e0a0cd6428318a699b99f60bd3020_"
+                                 "16144d379ce6b276aedc7c83df65679a7490726380183427",
+                     "title": "doc.pdf"}],
+                "is_end": True, "next_cursor": ""}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.kb_numeric_id_from_contents(self._cfg(), "b64kb")
+        self.assertEqual(nid, "7490726380183427")
+
+    def test_kb_numeric_id_from_contents_only_folders(self):
+        # 库内只有文件夹 -> 无可解析文档 -> None
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 0, "msg": "ok", "data": {
+                "knowledge_list": [
+                    {"media_id": "folder_7516872677265288", "title": "临时"}],
+                "is_end": True, "next_cursor": ""}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.kb_numeric_id_from_contents(self._cfg(), "b64kb")
+        self.assertIsNone(nid)
+
+    def test_kb_numeric_id_from_contents_api_error(self):
+        def fake_post(url, json=None, headers=None, timeout=None):
+            f = mock.Mock()
+            f.status_code = 200
+            f.json.return_value = {"code": 200001, "msg": "limited", "data": {}}
+            f.raise_for_status.return_value = None
+            return f
+
+        with mock.patch.object(ima_search.requests, "post", side_effect=fake_post):
+            nid = ima_search.kb_numeric_id_from_contents(self._cfg(), "b64kb")
+        self.assertIsNone(nid)
+
 
 class TestEvBundler(unittest.TestCase):
     def test_pick_bundled_port_order_and_fallback(self):

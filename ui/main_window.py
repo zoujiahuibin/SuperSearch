@@ -716,11 +716,11 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(deeplink))
 
     def _open_ima_kb(self, r: SearchResult):
-        """ima 打开路径：解析数字 knowledgeBaseId，优先用 ima 电脑端精准打开该知识库。
+        """ima 打开路径：解析数字 knowledgeBaseId，用 ima 电脑端精准打开该知识库。
 
-        网页/客户端深链都需要数字型 knowledgeBaseId，OpenAPI 只给 base64 kb_id
-        （无法换算），故用 get_knowledge_list 根目录的 current_path[0].folder_id
-        解析，并按 kb_id 缓存。
+        数字 ID 解析顺序（2026-10-23 实测，见 _resolve_kb_numeric）：
+        列库内容从文档 media_id 尾部提取（现行唯一稳定来源）-> 根目录
+        folder_id（当前判负，保留）-> 都失败则打开 ima 网页。按 kb_id 缓存。
         """
         numeric = self._kb_numeric_cache.get(r.kb_id) if r.kb_id else None
         if numeric is None and r.kb_id and self.ima_cfg.has_credentials:
@@ -739,9 +739,13 @@ class MainWindow(QMainWindow):
     def _resolve_kb_numeric(self, kb_id: str):
         """解析并缓存 kb_id(base64) -> 数字 knowledgeBaseId；失败返回 None。
 
-        负面缓存：已知解析不出数字 ID 的 kb_id 记入 _kb_numeric_failed，
-        避免每次打开都白跑一次 get_knowledge_list 请求（OpenAPI 当前不暴露
-        数字 ID，见 ima_search.get_kb_numeric_id 的背景说明）。
+        两条路径（2026-10-23 实测，按成本排序）：
+          1) 列库内容（get_knowledge_list），取任一条文档 media_id 的尾部
+             数字——实测即数字 kb_id，现有账号下唯一稳定可行的来源；
+          2) get_knowledge_list 根目录 current_path[0].folder_id——当前返回
+             base64 kb_id 会判负；保留以防 ima 恢复该行为。
+        负面缓存：已知解析不出的 kb_id 记入 _kb_numeric_failed，避免每次
+        打开都白跑请求。
         """
         numeric = self._kb_numeric_cache.get(kb_id)
         if numeric:
@@ -750,7 +754,9 @@ class MainWindow(QMainWindow):
             return None
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            numeric = ima_search.get_kb_numeric_id(self.ima_cfg, kb_id)
+            numeric = ima_search.kb_numeric_id_from_contents(self.ima_cfg, kb_id)
+            if not numeric:
+                numeric = ima_search.get_kb_numeric_id(self.ima_cfg, kb_id)
         except Exception:  # noqa: BLE001
             numeric = None
         finally:
@@ -788,19 +794,27 @@ class MainWindow(QMainWindow):
         真正打开文档的开关；未装电脑端则回退：用 get_media_info 的 COS 直链在默认浏览器
         打开（PDF/图片预览，Office 下载）。失败回退 ima 网页。
 
-        2026-10-23 修正：OpenAPI 不暴露数字 knowledgeBaseId（其 ID 空间只有 base64 的
-        ima_kb_XXX），get_kb_numeric_id 增加纯数字校验后对现有账号恒返回 None，
-        因此正常情况下走 COS 直链回退（实测可用）；深链路径保留，待 OpenAPI 暴露
-        数字 ID 时自动恢复。
+        2026-10-23 实证与修复：客户端深链要求数字雪花型 knowledgeBaseId，
+        OpenAPI 无直接字段，但**文档 media_id 的尾部数字就是数字 kb_id**
+        （pdf_<md5>_<md5><数字kb_id>；同库一致、跨库互异，且与客户端自身
+        构造的深链完全同构——据客户端会话文件核实）。因此文档打开零额外
+        请求即可拼出正确深链；仅在 media_id 结构不匹配（如文件夹）时按库
+        解析（_resolve_kb_numeric），再不行才走 COS 直链回退。
         """
         if not self.ima_cfg.has_credentials or not r.ref_id:
             QDesktopServices.openUrl(QUrl("https://ima.qq.com/"))
             self.status.showMessage("未配置 ima 凭证或无文档 ID，已打开 ima 网页")
             return
 
-        # 装了电脑端：用 open?url= 桥 + action=autoOpenMedia 精准打开该篇
-        if self._ima_client_available() and r.kb_id:
-            numeric = self._resolve_kb_numeric(r.kb_id)
+        # 装了电脑端：用 open?url= 桥 + action=autoOpenMedia 精准打开该篇。
+        # 数字 knowledgeBaseId 优先从该文档自己的 media_id 尾部提取（零额外
+        # 请求，2026-10-23 实测：media_id 尾部数字即数字 kb_id，与客户端自身
+        # 构造的深链格式一致）；提取不到再走按库解析（列库内容提取 / 根目录
+        # folder_id，带正负缓存）。
+        if self._ima_client_available():
+            numeric = ima_search.numeric_kb_id_from_media_id(r.ref_id)
+            if not numeric and r.kb_id:
+                numeric = self._resolve_kb_numeric(r.kb_id)
             if numeric:
                 self._open_ima_deeplink(ima_search.ima_client_doc_url(numeric, r.ref_id))
                 self.status.showMessage(f"已在 ima 客户端打开文档：{r.title}")
