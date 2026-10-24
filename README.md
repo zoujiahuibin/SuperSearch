@@ -121,7 +121,7 @@ venv/Scripts/python.exe main.py
 ### 运行测试
 
 ```bash
-venv/Scripts/python.exe tests/smoke_test.py   # 75 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑 + 索引就绪等待 + 退出等待落盘 + ima 深链数字 ID 提取）
+venv/Scripts/python.exe tests/smoke_test.py   # 77 项纯逻辑冒烟测试（含系统托盘 + Everything 服务逻辑 + 索引就绪等待 + 退出等待落盘 + ima 深链数字 ID 提取）
 # 可选：无界面验证 GUI 可构造
 QT_QPA_PLATFORM=offscreen venv/Scripts/python.exe tests/verify_gui.py
 ```
