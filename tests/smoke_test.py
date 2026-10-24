@@ -1327,5 +1327,36 @@ class TestTray(unittest.TestCase):
         self.assertFalse(evt.isAccepted(), "最小化到托盘时 closeEvent 应 ignore")
 
 
+class TestLocalSearchHint(unittest.TestCase):
+    """本地检索失败/未就绪时必须附上 Everything HTTP Server 排查提示（v1.2.3）。"""
+
+    def test_hint_constant_mentions_http_server(self):
+        from ui import main_window
+        self.assertIn("Everything", main_window.LOCAL_SEARCH_HINT)
+        self.assertIn("HTTP Server", main_window.LOCAL_SEARCH_HINT)
+
+    def test_worker_local_failure_emits_hint(self):
+        # do_local=True 且 Everything 未就绪（ensure 返回 ok=False）时，
+        # error_ready 消息须包含排查提示
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from ui import main_window
+        app = QApplication.instance() or QApplication([])
+        errs: list = []
+        with mock.patch.object(
+                main_window.ev_bundler, "ensure_everything_running",
+                return_value=(EverythingConfig(), None, False)):
+            w = main_window.SearchWorker(
+                "q", EverythingConfig(), cfg_mod.ImaConfig("", ""), None,
+                do_local=True, do_ima=False)
+            w.error_ready.connect(errs.append)
+            w.result_ready.connect(lambda _res: None)
+            w.run()
+        self.assertEqual(len(errs), 1)
+        self.assertIn("本地检索不可用", errs[0])
+        self.assertIn("HTTP Server", errs[0])
+        self.assertIn(main_window.LOCAL_SEARCH_HINT, errs[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

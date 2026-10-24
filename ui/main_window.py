@@ -67,6 +67,13 @@ from search import local_search, ima_search
 COLOR_LOCAL = QColor("#1565C0")  # 蓝
 COLOR_IMA = QColor("#2E7D32")    # 绿
 
+# 本地检索失败/未就绪时的排查提示。打包版用户桌面没有 Everything 窗口，
+# 这条指引是他们自助排查的第一入口（v1.2.3 新增）。
+LOCAL_SEARCH_HINT = (
+    "如无法正常搜索本地文件，请检查 Everything 的 HTTP Server 是否正常打开"
+    "（Everything → 工具 → 选项 → HTTP 服务器，勾选“启用 HTTP 服务器”）"
+)
+
 def _detect_drives() -> List[str]:
     """检测本机存在的盘符字母（Windows）。非 Windows 返回 ["C"] 兜底。"""
     import string
@@ -178,9 +185,10 @@ class SearchWorker(QThread):
                     results.extend(local_search.search_local(
                         self.query, ev_cfg, drives=self.local_drives))
                 except Exception as e:  # noqa: BLE001
-                    self.error_ready.emit(f"本地检索失败：{e}")
+                    self.error_ready.emit(f"本地检索失败：{e}；{LOCAL_SEARCH_HINT}")
             else:
-                self.error_ready.emit(ev_note or "本地检索不可用")
+                self.error_ready.emit(
+                    (ev_note or "本地检索不可用") + "；" + LOCAL_SEARCH_HINT)
             if has_ima:
                 self.progress_pct.emit(20)
             else:
@@ -427,8 +435,12 @@ class MainWindow(QMainWindow):
             if not local_search.is_everything_reachable(self.ev_cfg):
                 if ev_bundler.bundled_everything_exe():
                     # 已自动启动内置 Everything 便携版（正在建立索引），
-                    # 首次检索时会自动等待其就绪，不必打扰用户
-                    self.status.showMessage("内置 Everything 正在启动（首次需建立索引）…")
+                    # 首次检索时会自动等待其就绪，不必打扰用户；
+                    # 但若持续无法检索本地文件，需引导用户自查 HTTP Server
+                    # （打包版桌面无 Everything 窗口，这是唯一入口）。
+                    self.status.showMessage(
+                        "内置 Everything 正在启动（首次需建立索引）…；"
+                        + LOCAL_SEARCH_HINT)
                 else:
                     msgs.append(
                         f"Everything HTTP Server 不可达（{self.ev_cfg.base_url}），"
