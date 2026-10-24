@@ -59,6 +59,7 @@ from core.config import (
 )
 from core import format_sort
 from core import ev_bundler
+from core.explorer_select import open_folder_and_select
 from core.models import SearchResult
 from search import local_search, ima_search
 
@@ -660,25 +661,14 @@ class MainWindow(QMainWindow):
             self._open_ima(r)
 
     def _open_result_path(self, r: SearchResult):
-        """【打开路径】：本地打开所在文件夹（并选中文件）；ima 打开 ima 网页到对应知识库。"""
+        """【打开路径】：本地打开所在文件夹并选中检索到的文件；ima 打开 ima 网页到对应知识库。
+
+        选中能力见 core.explorer_select.open_folder_and_select：
+        Win32 SHOpenFolderAndSelectItems → explorer /select → 仅打开文件夹，
+        逐级静默降级；文件夹结果打开其本身；ima 结果不受影响。
+        """
         if r.source == "local" and r.path:
-            # 打开所在文件夹：文件夹结果打开其本身；文件结果打开其父目录（即"路径"列的目录）。
-            # 用 os.startfile 直接打开该目录——比 `explorer /select,<path>` 稳定，
-            # 后者在部分环境会退回打开默认"文档"库。
-            target = (
-                r.path if (r.kind == "folder" and os.path.isdir(r.path))
-                else (os.path.dirname(r.path) or r.path)
-            )
-            try:
-                if target and os.path.isdir(target):
-                    if os.name == "nt":
-                        os.startfile(target)
-                    else:
-                        QDesktopServices.openUrl(QUrl.fromLocalFile(target))
-                elif target:
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(target))
-            except Exception:  # noqa: BLE001
-                pass
+            open_folder_and_select(r.path)
         elif r.source == "ima":
             self._open_ima_kb(r)
 

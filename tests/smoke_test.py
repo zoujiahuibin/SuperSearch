@@ -1358,5 +1358,162 @@ class TestLocalSearchHint(unittest.TestCase):
         self.assertIn(main_window.LOCAL_SEARCH_HINT, errs[0])
 
 
+class TestOpenFolderAndSelect(unittest.TestCase):
+    """【打开路径】选中文件逻辑（core.explorer_select）：Win32 主路径 + 两级静默降级。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        # 文件名带空格与中文，覆盖引号/解析边界
+        self.file = os.path.join(self.tmp, "报告 2026.pdf")
+        with open(self.file, "w", encoding="utf-8") as f:
+            f.write("x")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_file_result_selects_via_shell_api(self):
+        from core import explorer_select
+        with mock.patch.object(explorer_select, "_sh_open_and_select") as m_sh, \
+             mock.patch.object(explorer_select, "_explorer_select") as m_exp, \
+             mock.patch.object(explorer_select, "_open_folder_only") as m_open:
+            ok = explorer_select.open_folder_and_select(self.file)
+        self.assertTrue(ok)
+        m_sh.assert_called_once_with(self.file)
+        m_exp.assert_not_called()
+        m_open.assert_not_called()
+
+    def test_shell_api_failure_falls_back_to_explorer(self):
+        from core import explorer_select
+        with mock.patch.object(
+                explorer_select, "_sh_open_and_select",
+                side_effect=OSError("boom")), \
+             mock.patch.object(explorer_select, "_explorer_select") as m_exp, \
+             mock.patch.object(explorer_select, "_open_folder_only") as m_open:
+            ok = explorer_select.open_folder_and_select(self.file)
+        self.assertTrue(ok)
+        m_exp.assert_called_once_with(self.file)
+        m_open.assert_not_called()
+
+    def test_all_select_failures_fall_back_to_open_folder(self):
+        from core import explorer_select
+        with mock.patch.object(
+                explorer_select, "_sh_open_and_select",
+                side_effect=OSError("boom")), \
+             mock.patch.object(
+                explorer_select, "_explorer_select",
+                side_effect=OSError("boom")), \
+             mock.patch.object(
+                explorer_select, "_open_folder_only", return_value=True) as m_open:
+            ok = explorer_select.open_folder_and_select(self.file)
+        self.assertTrue(ok)
+        m_open.assert_called_once_with(self.tmp)
+
+    def test_missing_file_opens_folder_without_select(self):
+        # 陈旧索引命中已删文件：无法选中，仅打开所在文件夹
+        from core import explorer_select
+        missing = os.path.join(self.tmp, "已删除的文档.docx")
+        with mock.patch.object(explorer_select, "_sh_open_and_select") as m_sh, \
+             mock.patch.object(explorer_select, "_explorer_select") as m_exp, \
+             mock.patch.object(
+                explorer_select, "_open_folder_only", return_value=True) as m_open:
+            ok = explorer_select.open_folder_and_select(missing)
+        self.assertTrue(ok)
+        m_sh.assert_not_called()
+        m_exp.assert_not_called()
+        m_open.assert_called_once_with(self.tmp)
+
+    def test_folder_result_opens_folder_itself(self):
+        from core import explorer_select
+        with mock.patch.object(
+                explorer_select, "_open_folder_only", return_value=True) as m_open, \
+             mock.patch.object(explorer_select, "_sh_open_and_select") as m_sh:
+            ok = explorer_select.open_folder_and_select(self.tmp)
+        self.assertTrue(ok)
+        m_open.assert_called_once_with(self.tmp)
+        m_sh.assert_not_called()
+
+    def test_missing_parent_does_nothing(self):
+        # 父目录也不存在（网络盘掉线）：不动资源管理器，避免退回打开默认"文档"库
+        from core import explorer_select
+        gone = os.path.join(self.tmp, "不存在的子目录", "file.txt")
+        with mock.patch.object(explorer_select, "_sh_open_and_select") as m_sh, \
+             mock.patch.object(explorer_select, "_explorer_select") as m_exp, \
+             mock.patch.object(explorer_select, "_open_folder_only") as m_open:
+            ok = explorer_select.open_folder_and_select(gone)
+        self.assertFalse(ok)
+        m_sh.assert_not_called()
+        m_exp.assert_not_called()
+        m_open.assert_not_called()
+
+    def test_empty_path_returns_false(self):
+        from core import explorer_select
+        self.assertFalse(explorer_select.open_folder_and_select(""))
+
+    @unittest.skipUnless(os.name == "nt", "explorer /select 命令仅适用于 Windows")
+    def test_explorer_select_uses_quoted_command(self):
+        from core import explorer_select
+        with mock.patch.object(explorer_select.subprocess, "Popen") as m_popen:
+            explorer_select._explorer_select(self.file)
+        m_popen.assert_called_once_with(f'explorer /select,"{self.file}"')
+
+    def test_non_windows_file_result_falls_back_to_open_folder(self):
+        # 非 Windows 时选中不可用，文件结果也应至少打开所在文件夹
+        from core import explorer_select
+        with mock.patch.object(os, "name", "posix"), \
+             mock.patch.object(
+                explorer_select, "_open_folder_only", return_value=True) as m_open, \
+             mock.patch.object(explorer_select, "_sh_open_and_select") as m_sh:
+            ok = explorer_select.open_folder_and_select(self.file)
+        self.assertTrue(ok)
+        m_sh.assert_not_called()
+        m_open.assert_called_once_with(self.tmp)
+
+
+class TestOpenResultPathSelectsFile(unittest.TestCase):
+    """【打开路径】按钮动作：本地文件结果须走选中逻辑；ima 结果不受影响。"""
+
+    @staticmethod
+    def _result(source="local", kind="file", path="C:\\a\\b.txt"):
+        return SearchResult(source=source, title="t", path=path, kind=kind)
+
+    @staticmethod
+    def _make_window():
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from ui import main_window
+        app = QApplication.instance() or QApplication([])
+        with mock.patch.object(
+                main_window.ev_bundler, "ensure_everything_running",
+                return_value=(EverythingConfig(), None, False)), \
+             mock.patch.object(main_window.MainWindow, "_check_backends"), \
+             mock.patch.object(main_window.MainWindow, "_setup_tray"):
+            win = main_window.MainWindow()
+        return main_window, win
+
+    def test_local_file_result_opens_folder_and_selects(self):
+        main_window, win = self._make_window()
+        with mock.patch.object(main_window, "open_folder_and_select") as m_sel, \
+             mock.patch.object(win, "_open_ima_kb") as m_kb:
+            win._open_result_path(self._result(path="C:\\a\\b.txt"))
+        m_sel.assert_called_once_with("C:\\a\\b.txt")
+        m_kb.assert_not_called()
+
+    def test_local_folder_result_opens_folder_itself(self):
+        main_window, win = self._make_window()
+        with mock.patch.object(main_window, "open_folder_and_select") as m_sel:
+            win._open_result_path(self._result(kind="folder", path="C:\\a"))
+        m_sel.assert_called_once_with("C:\\a")
+
+    def test_ima_result_still_opens_kb(self):
+        main_window, win = self._make_window()
+        with mock.patch.object(main_window, "open_folder_and_select") as m_sel, \
+             mock.patch.object(win, "_open_ima_kb") as m_kb:
+            win._open_result_path(self._result(source="ima", path=""))
+        m_sel.assert_not_called()
+        m_kb.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

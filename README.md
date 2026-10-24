@@ -105,7 +105,7 @@ venv/Scripts/python.exe main.py
 5. **筛选**：结果区下方「筛选」下拉可只看 全部 / 本地 / ima。
 6. **打开**：**双击**本地结果会用系统默认程序打开（文件则打开文件、否则打开所在文件夹）；**双击 ima 结果****优先在 ima 电脑端客户端内打开该篇文档**（深链精准定位；未安装客户端、或数字 ID 解析失败时，回退为取其 COS 预签名直链用默认浏览器打开——PDF / 图片直接预览，Office 等下载到本地）。也可在任一行上**右键**，选：
    - **打开**：与双击效果相同；
-   - **打开路径**：本地结果打开其**所在文件夹**（即“路径”列所示的目录；文件夹结果则打开该文件夹本身）；ima 结果**在 ima 客户端打开对应知识库**（未装客户端则打开 ima 网页）。
+   - **打开路径**：本地结果在资源管理器中打开其**所在文件夹并选中该文件**（即“路径”列所示的目录；文件夹结果则打开该文件夹本身，无选中语义）；ima 结果**在 ima 客户端打开对应知识库**（未装客户端则打开 ima 网页）。选中经 Win32 `SHOpenFolderAndSelectItems` 实现，失败时静默降级 `explorer /select` → 仅打开文件夹；文件已被删除（陈旧索引）时同样仅打开所在文件夹。
 
 > **ima 电脑端深链机制（2026-10-23 实证修复）**：安装 ima.copilot 后注册的 `imacopilot://` 协议承载文档打开深链：`imacopilot://open?url=chrome-extension://nkohmbngmopdajidckglcoehlaeepeoi/index.html?action=autoOpenMedia&knowledgeBaseId=<数字ID>&mediaId=<媒体ID>`。客户端「知识库页」仅在 `action===autoOpenMedia` 且 `knowledgeBaseId`、`mediaId` 同时存在时才打开该篇文档。**关键发现**：其中的数字型 `knowledgeBaseId` 无需额外接口——它就藏在每条文档 `media_id` 的尾部（`pdf_<md5>_<md5><数字kb_id>`；实测同库所有文档共享该后缀、跨库互异，且与客户端自身构造的深链完全同构，据客户端会话文件核实）。因此双击文档时直接从该条结果的 `media_id` 提取（零额外请求）；「打开路径」则列一次库内容提取（按库缓存）。解析失败（如文件夹条目）时逐级回退：根目录 `folder_id`（当前返回 base64 会判负，保留）→ COS 直链 → ima 网页。此前版本误把 base64 `ima_kb_XXX` 当数字 ID 传入导致客户端报“参数错误”，现已修复。
 7. **查看详情**：单击任一行，底部显示路径 / 大小 / 时间，或 ima 高亮摘要。
