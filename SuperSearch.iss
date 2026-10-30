@@ -16,7 +16,7 @@
 ; ============================================================================
 
 #define MyAppName "SuperSearch"
-#define MyAppVersion "1.2.3"
+#define MyAppVersion "1.2.4"
 #define MyAppPublisher "Jiahui Zou"
 #define MyAppExeName "SuperSearch.exe"
 #define MyAppIco "assets\SuperSearch.ico"
